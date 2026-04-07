@@ -1,0 +1,182 @@
+import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify'
+import { createHmac, timingSafeEqual } from 'crypto'
+import { syncAll, syncTeams, syncProjects, syncIssues, triggerDeploys } from '../linear/sync.js'
+
+// Linear sends webhooks for these action types
+const RELEVANT_ACTIONS = new Set([
+  'create',
+  'update',
+  'remove',
+])
+
+// These resource types affect the roadmap
+const RELEVANT_TYPES = new Set([
+  'Issue',
+  'Project',
+  'ProjectMilestone',
+  'IssueLabel',
+])
+
+function requireAuth(request: FastifyRequest, reply: FastifyReply): boolean {
+  const secret = process.env.API_SECRET
+  const auth = request.headers['authorization']
+  if (secret && auth !== `Bearer ${secret}`) {
+    reply.status(401).send({ error: 'Unauthorized' })
+    return false
+  }
+  return true
+}
+
+export async function webhookRoutes(app: FastifyInstance) {
+  /**
+   * POST /webhook/linear
+   *
+   * Receives Linear webhook events.
+   * Linear signs each request with HMAC-SHA256 using your webhook secret.
+   * We verify the signature before processing.
+   *
+   * Webhook events are routed to the minimal targeted sync rather than a full
+   * syncAll(), reducing Linear API load significantly:
+   *   Issue / IssueLabel  → syncIssues()
+   *   Project / Milestone → syncProjects()
+   */
+  app.post(
+    '/webhook/linear',
+    {
+      config: {
+        // Fastify needs the raw body for HMAC verification
+        rawBody: true,
+      },
+    },
+    async (request, reply) => {
+      // --- Signature verification ---
+      const secret = process.env.LINEAR_WEBHOOK_SECRET
+      if (!secret) {
+        app.log.error('LINEAR_WEBHOOK_SECRET is not set')
+        return reply.status(500).send({ error: 'Webhook secret not configured' })
+      }
+
+      const signature = request.headers['linear-signature'] as string | undefined
+      if (!signature) {
+        return reply.status(401).send({ error: 'Missing Linear-Signature header' })
+      }
+
+      const rawBody = (request as any).rawBody as Buffer
+      const expectedSig = createHmac('sha256', secret)
+        .update(rawBody)
+        .digest('hex')
+
+      const sigBuffer = Buffer.from(signature)
+      const expectedBuffer = Buffer.from(expectedSig)
+
+      if (
+        sigBuffer.length !== expectedBuffer.length ||
+        !timingSafeEqual(sigBuffer, expectedBuffer)
+      ) {
+        app.log.warn('Invalid webhook signature')
+        return reply.status(401).send({ error: 'Invalid signature' })
+      }
+
+      // --- Parse payload ---
+      const payload = request.body as {
+        type?: string
+        action?: string
+        data?: unknown
+      }
+
+      const { type, action } = payload
+
+      app.log.info({ type, action }, 'Linear webhook received')
+
+      // Acknowledge immediately — Linear expects a fast 200
+      reply.status(200).send({ received: true })
+
+      // Route to the minimal targeted sync based on what changed
+      if (
+        type && RELEVANT_TYPES.has(type) &&
+        action && RELEVANT_ACTIONS.has(action)
+      ) {
+        let syncFn: () => Promise<void>
+
+        if (type === 'Issue' || type === 'IssueLabel') {
+          syncFn = syncIssues
+        } else if (type === 'Project' || type === 'ProjectMilestone') {
+          syncFn = syncProjects
+        } else {
+          syncFn = syncAll
+        }
+
+        app.log.info({ type, action }, 'Triggering targeted sync...')
+
+        syncFn()
+          .then(() => triggerDeploys())
+          .catch((err) => {
+            app.log.error({ err }, 'Sync failed after webhook')
+          })
+      }
+    }
+  )
+
+  /**
+   * POST /api/sync
+   *
+   * Manually trigger a full sync. Protected by API_SECRET header.
+   *
+   * curl -X POST https://your-service.com/api/sync \
+   *   -H "Authorization: Bearer YOUR_API_SECRET"
+   */
+  app.post('/api/sync', async (request, reply) => {
+    if (!requireAuth(request, reply)) return
+    reply.status(202).send({ message: 'Sync started' })
+    syncAll()
+      .then(() => triggerDeploys())
+      .catch((err) => {
+        app.log.error({ err }, 'Manual sync failed')
+      })
+  })
+
+  /**
+   * POST /api/sync/teams
+   *
+   * Manually trigger a teams-only sync.
+   */
+  app.post('/api/sync/teams', async (request, reply) => {
+    if (!requireAuth(request, reply)) return
+    reply.status(202).send({ message: 'Teams sync started' })
+    syncTeams()
+      .then(() => triggerDeploys())
+      .catch((err) => {
+        app.log.error({ err }, 'Teams sync failed')
+      })
+  })
+
+  /**
+   * POST /api/sync/projects
+   *
+   * Manually trigger a projects + milestones sync.
+   */
+  app.post('/api/sync/projects', async (request, reply) => {
+    if (!requireAuth(request, reply)) return
+    reply.status(202).send({ message: 'Projects sync started' })
+    syncProjects()
+      .then(() => triggerDeploys())
+      .catch((err) => {
+        app.log.error({ err }, 'Projects sync failed')
+      })
+  })
+
+  /**
+   * POST /api/sync/issues
+   *
+   * Manually trigger an issues + labels sync.
+   */
+  app.post('/api/sync/issues', async (request, reply) => {
+    if (!requireAuth(request, reply)) return
+    reply.status(202).send({ message: 'Issues sync started' })
+    syncIssues()
+      .then(() => triggerDeploys())
+      .catch((err) => {
+        app.log.error({ err }, 'Issues sync failed')
+      })
+  })
+}

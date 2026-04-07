@@ -1,0 +1,103 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Team {
+  id          String    @id
+  name        String
+  key         String    @unique
+  description String?
+  color       String?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  projects    Project[]
+}
+
+model Project {
+  id          String         @id
+  name        String
+  description String?
+  state       String         // planned | started | paused | completed | cancelled
+  color       String?
+  icon        String?
+  priority    Int            @default(0)
+  startDate   DateTime?
+  targetDate  DateTime?
+  progress    Float          @default(0)
+  url         String?
+  createdAt   DateTime       @default(now())
+  updatedAt   DateTime       @updatedAt
+
+  teamId      String?
+  team        Team?          @relation(fields: [teamId], references: [id])
+
+  milestones  Milestone[]
+  issues      Issue[]
+}
+
+model Milestone {
+  id          String    @id
+  name        String
+  description String?
+  targetDate  DateTime?
+  sortOrder   Float     @default(0)
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  projectId   String
+  project     Project   @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  issues      Issue[]
+}
+
+model Issue {
+  id           String    @id
+  title        String
+  description  String?
+  state        String    // triage | backlog | unstarted | started | completed | cancelled
+  stateName    String
+  stateColor   String?
+  stateType    String?
+  priority     Int       @default(0)   // 0=no priority, 1=urgent, 2=high, 3=medium, 4=low
+  priorityName String?
+  estimate     Float?
+  dueDate      DateTime?
+  completedAt  DateTime?
+  cancelledAt  DateTime?
+  url          String?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  projectId    String?
+  project      Project?  @relation(fields: [projectId], references: [id])
+
+  milestoneId  String?
+  milestone    Milestone? @relation(fields: [milestoneId], references: [id])
+
+  assigneeId   String?
+  assigneeName String?
+
+  labels       Label[]
+}
+
+model Label {
+  id        String  @id
+  name      String
+  color     String?
+
+  issues    Issue[]
+}
+
+// Tracks the last time we synced from Linear
+model SyncMeta {
+  id          Int      @id @default(1)
+  lastSyncAt  DateTime @default(now())
+  status      String   @default("idle") // idle | running | error
+  error       String?
+}

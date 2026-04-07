@@ -1,0 +1,34 @@
+{
+  "name": "linear-roadmap-service",
+  "version": "1.0.0",
+  "description": "Standalone service to sync Linear data to PostgreSQL and expose a roadmap JSON endpoint",
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "sync": "tsx src/linear/sync.ts",
+    "sync:teams": "tsx src/linear/sync-cli.ts teams",
+    "sync:projects": "tsx src/linear/sync-cli.ts projects",
+    "sync:issues": "tsx src/linear/sync-cli.ts issues",
+    "db:generate": "prisma generate",
+    "db:migrate": "prisma migrate dev",
+    "db:push": "prisma db push",
+    "db:studio": "prisma studio"
+  },
+  "dependencies": {
+    "@linear/sdk": "^25.0.0",
+    "@prisma/client": "^5.22.0",
+    "fastify": "^4.28.0",
+    "@fastify/cors": "^9.0.0",
+    "dotenv": "^16.4.5",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "prisma": "^5.22.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0"
+  }
+}
