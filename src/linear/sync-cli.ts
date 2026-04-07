@@ -1,5 +1,5 @@
 import 'dotenv/config'
-import { syncAll, syncTeams, syncProjects, syncIssues, triggerDeploys } from './sync.js'
+import { syncAll, syncTeams, syncProjects, syncIssues, syncInitiatives, triggerDeploys } from './sync.js'
 import { prisma } from '../db/client.js'
 
 const target = process.argv[2] // 'teams' | 'projects' | 'issues' | undefined
@@ -14,6 +14,9 @@ async function main() {
       break
     case 'issues':
       await syncIssues()
+      break
+    case 'initiatives':
+      await syncInitiatives()
       break
     default:
       await syncAll()

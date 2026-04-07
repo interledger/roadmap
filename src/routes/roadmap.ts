@@ -1,6 +1,6 @@
 import type { FastifyInstance } from 'fastify'
 import { prisma } from '../db/client.js'
-import type { RoadmapSnapshot } from '../types/roadmap.js'
+import type { RoadmapSnapshot, RoadmapInitiative } from '../types/roadmap.js'
 
 export async function roadmapRoutes(app: FastifyInstance) {
   /**
@@ -14,7 +14,7 @@ export async function roadmapRoutes(app: FastifyInstance) {
   app.get<{ Querystring: { team?: string } }>('/api/roadmap.json', async (request, reply) => {
     const { team: teamKey } = request.query
 
-    const [teams, projects, syncMeta] = await Promise.all([
+    const [teams, projects, initiatives, syncMeta] = await Promise.all([
       prisma.team.findMany({ orderBy: { name: 'asc' } }),
       prisma.project.findMany({
         where: teamKey ? { team: { key: teamKey } } : undefined,
@@ -37,8 +37,15 @@ export async function roadmapRoutes(app: FastifyInstance) {
           },
         },
       }),
+      prisma.initiative.findMany({
+        orderBy: { sortOrder: 'asc' },
+        include: { projects: true },
+      }),
       prisma.syncMeta.findUnique({ where: { id: 1 } }),
     ])
+
+    // Build a map for fast project lookup (used to derive initiative startDate)
+    const projectById = new Map(projects.map((p) => [p.id, p]))
 
     const snapshot: RoadmapSnapshot = {
       generatedAt: new Date().toISOString(),
@@ -50,6 +57,29 @@ export async function roadmapRoutes(app: FastifyInstance) {
         color: t.color,
         projectCount: projects.filter((p) => p.teamId === t.id).length,
       })),
+      initiatives: initiatives.map((i): RoadmapInitiative => {
+        // Derive startDate as the earliest startDate among child projects
+        const childStartDates = i.projects
+          .map((p) => projectById.get(p.projectId)?.startDate)
+          .filter((d): d is Date => d != null)
+        const startDate = childStartDates.length > 0
+          ? new Date(Math.min(...childStartDates.map((d) => d.getTime()))).toISOString()
+          : null
+
+        return {
+          id: i.id,
+          name: i.name,
+          description: i.description,
+          color: i.color,
+          icon: i.icon,
+          status: i.status,
+          sortOrder: i.sortOrder,
+          startDate,
+          targetDate: i.targetDate?.toISOString() ?? null,
+          slugId: i.slugId,
+          projectIds: i.projects.map((p) => p.projectId),
+        }
+      }),
       projects: projects.map((p) => ({
         id: p.id,
         name: p.name,
@@ -91,6 +121,7 @@ export async function roadmapRoutes(app: FastifyInstance) {
       prisma.team.count(),
       prisma.project.count(),
       prisma.issue.count(),
+      prisma.initiative.count(),
     ])
 
     return {
@@ -101,6 +132,7 @@ export async function roadmapRoutes(app: FastifyInstance) {
         teams: counts[0],
         projects: counts[1],
         issues: counts[2],
+        initiatives: counts[3],
       },
     }
   })
@@ -120,6 +152,7 @@ function formatIssue(issue: {
   priorityName: string | null
   estimate: number | null
   dueDate: Date | null
+  startedAt: Date | null
   completedAt: Date | null
   assigneeName: string | null
   url: string | null
@@ -135,6 +168,7 @@ function formatIssue(issue: {
     priorityName: issue.priorityName,
     estimate: issue.estimate,
     dueDate: issue.dueDate?.toISOString() ?? null,
+    startedAt: issue.startedAt?.toISOString() ?? null,
     completedAt: issue.completedAt?.toISOString() ?? null,
     assigneeName: issue.assigneeName,
     url: issue.url,

@@ -16,6 +16,7 @@ export interface RoadmapIssue {
   priorityName: string | null
   estimate: number | null
   dueDate: string | null
+  startedAt: string | null
   completedAt: string | null
   assigneeName: string | null
   url: string | null
@@ -60,9 +61,24 @@ export interface RoadmapTeam {
   projectCount: number
 }
 
+export interface RoadmapInitiative {
+  id: string
+  name: string
+  description: string | null
+  color: string | null
+  icon: string | null
+  status: string
+  sortOrder: number
+  startDate: string | null
+  targetDate: string | null
+  slugId: string | null
+  projectIds: string[]
+}
+
 export interface RoadmapSnapshot {
   generatedAt: string
   lastSyncAt: string | null
   teams: RoadmapTeam[]
   projects: RoadmapProject[]
+  initiatives: RoadmapInitiative[]
 }

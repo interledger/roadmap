@@ -9,7 +9,7 @@ import { prisma } from '../db/client.js'
 // This coalesces any number of queued requests into at most one follow-up run.
 // ---------------------------------------------------------------------------
 
-type SyncType = 'teams' | 'projects' | 'issues' | 'all'
+type SyncType = 'teams' | 'projects' | 'issues' | 'initiatives' | 'all'
 
 const syncState = new Map<SyncType, { running: boolean; pending: boolean }>()
 
@@ -58,9 +58,9 @@ export async function syncAll(): Promise<void> {
     })
 
     try {
-      await _syncTeams()
-      await _syncProjects()
+      await _syncProjects() // also syncs teams first (FK dependency)
       await _syncIssues()
+      await _syncInitiatives()
 
       await prisma.syncMeta.update({
         where: { id: 1 },
@@ -101,34 +101,353 @@ export async function syncIssues(): Promise<void> {
   return runWithGuard('issues', _syncIssues)
 }
 
+/** Sync only initiatives (and their project associations). */
+export async function syncInitiatives(): Promise<void> {
+  return runWithGuard('initiatives', _syncInitiatives)
+}
+
 // ---------------------------------------------------------------------------
-// Teams
+// Single-entity syncs — called from webhook handler when we have an entity ID
 // ---------------------------------------------------------------------------
 
-async function _syncTeams() {
-  console.log('[sync] Fetching teams...')
-  const teams = await linear.teams()
+const SINGLE_PROJECT_QUERY = `
+  query SyncSingleProject($id: String!) {
+    project(id: $id) {
+      id
+      name
+      description
+      state
+      color
+      icon
+      startDate
+      targetDate
+      progress
+      url
+      teams {
+        nodes { id }
+      }
+    }
+  }
+`
 
-  for (const team of teams.nodes) {
-    await prisma.team.upsert({
-      where: { id: team.id },
-      update: {
-        name: team.name,
-        key: team.key,
-        description: team.description ?? null,
-        color: team.color ?? null,
+type SingleProjectQueryResult = {
+  project: {
+    id: string
+    name: string
+    description: string | null
+    state: string
+    color: string | null
+    icon: string | null
+    startDate: string | null
+    targetDate: string | null
+    progress: number
+    url: string
+    teams: { nodes: Array<{ id: string }> }
+  } | null
+}
+
+/** Sync a single project (and its milestones) by ID. */
+export async function syncSingleProject(id: string): Promise<void> {
+  const result = await linear.client.request<SingleProjectQueryResult>(
+    SINGLE_PROJECT_QUERY,
+    { id },
+  )
+
+  const project = result.project
+  if (!project) {
+    console.log(`[sync] Project ${id} not found in Linear, skipping.`)
+    return
+  }
+
+  const teamId = project.teams.nodes[0]?.id ?? null
+
+  await prisma.project.upsert({
+    where: { id: project.id },
+    update: {
+      name: project.name,
+      description: project.description ?? null,
+      state: project.state,
+      color: project.color ?? null,
+      icon: project.icon ?? null,
+      startDate: project.startDate ? new Date(project.startDate) : null,
+      targetDate: project.targetDate ? new Date(project.targetDate) : null,
+      progress: project.progress ?? 0,
+      url: project.url,
+      teamId,
+    },
+    create: {
+      id: project.id,
+      name: project.name,
+      description: project.description ?? null,
+      state: project.state,
+      color: project.color ?? null,
+      icon: project.icon ?? null,
+      startDate: project.startDate ? new Date(project.startDate) : null,
+      targetDate: project.targetDate ? new Date(project.targetDate) : null,
+      progress: project.progress ?? 0,
+      url: project.url,
+      teamId,
+    },
+  })
+
+  await syncMilestonesForProject(project.id)
+  console.log(`[sync] Upserted project ${project.id}.`)
+}
+
+/** Sync a single issue (and its labels) by ID. */
+export async function syncSingleIssue(id: string): Promise<void> {
+  const issue = await linear.issue(id)
+  if (!issue) {
+    console.log(`[sync] Issue ${id} not found in Linear, skipping.`)
+    return
+  }
+
+  const state = await issue.state
+  const assignee = await issue.assignee
+  const issueLabels = await issue.labels()
+  const projectId = (await issue.project)?.id ?? null
+  const milestoneId = (await issue.projectMilestone)?.id ?? null
+
+  const labelIds: string[] = []
+  for (const label of issueLabels.nodes) {
+    await prisma.label.upsert({
+      where: { id: label.id },
+      update: { name: label.name, color: label.color ?? null },
+      create: { id: label.id, name: label.name, color: label.color ?? null },
+    })
+    labelIds.push(label.id)
+  }
+
+  await prisma.issue.upsert({
+    where: { id: issue.id },
+    update: {
+      title: issue.title,
+      description: issue.description ?? null,
+      state: state?.type ?? 'unstarted',
+      stateName: state?.name ?? '',
+      stateColor: state?.color ?? null,
+      stateType: state?.type ?? null,
+      priority: issue.priority ?? 0,
+      priorityName: issue.priorityLabel,
+      estimate: issue.estimate ?? null,
+      dueDate: issue.dueDate ? new Date(issue.dueDate) : null,
+      startedAt: issue.startedAt ?? null,
+      completedAt: issue.completedAt ? new Date(issue.completedAt) : null,
+      cancelledAt: issue.cancelledAt ? new Date(issue.cancelledAt) : null,
+      url: issue.url,
+      projectId,
+      milestoneId,
+      assigneeId: assignee?.id ?? null,
+      assigneeName: assignee?.name ?? null,
+      labels: { set: labelIds.map((id) => ({ id })) },
+    },
+    create: {
+      id: issue.id,
+      title: issue.title,
+      description: issue.description ?? null,
+      state: state?.type ?? 'unstarted',
+      stateName: state?.name ?? '',
+      stateColor: state?.color ?? null,
+      stateType: state?.type ?? null,
+      priority: issue.priority ?? 0,
+      priorityName: issue.priorityLabel,
+      estimate: issue.estimate ?? null,
+      dueDate: issue.dueDate ? new Date(issue.dueDate) : null,
+      startedAt: issue.startedAt ?? null,
+      completedAt: issue.completedAt ? new Date(issue.completedAt) : null,
+      cancelledAt: issue.cancelledAt ? new Date(issue.cancelledAt) : null,
+      url: issue.url,
+      projectId,
+      milestoneId,
+      assigneeId: assignee?.id ?? null,
+      assigneeName: assignee?.name ?? null,
+      labels: { connect: labelIds.map((id) => ({ id })) },
+    },
+  })
+
+  console.log(`[sync] Upserted issue ${issue.id}.`)
+}
+
+const SINGLE_INITIATIVE_QUERY = `
+  query SyncSingleInitiative($id: String!) {
+    initiative(id: $id) {
+      id
+      name
+      description
+      color
+      icon
+      status
+      sortOrder
+      targetDate
+      slugId
+      projects {
+        nodes {
+          id
+          sortOrder
+        }
+      }
+    }
+  }
+`
+
+type SingleInitiativeQueryResult = {
+  initiative: {
+    id: string
+    name: string
+    description: string | null
+    color: string | null
+    icon: string | null
+    status: string
+    sortOrder: number
+    targetDate: string | null
+    slugId: string | null
+    projects: { nodes: Array<{ id: string; sortOrder: number }> }
+  } | null
+}
+
+/** Sync a single initiative (and its project associations) by ID. */
+export async function syncSingleInitiative(id: string): Promise<void> {
+  const result = await linear.client.request<SingleInitiativeQueryResult>(
+    SINGLE_INITIATIVE_QUERY,
+    { id },
+  )
+
+  const initiative = result.initiative
+  if (!initiative) {
+    console.log(`[sync] Initiative ${id} not found in Linear, skipping.`)
+    return
+  }
+
+  await prisma.initiative.upsert({
+    where: { id: initiative.id },
+    update: {
+      name: initiative.name,
+      description: initiative.description ?? null,
+      color: initiative.color ?? null,
+      icon: initiative.icon ?? null,
+      status: initiative.status.toLowerCase(),
+      sortOrder: initiative.sortOrder ?? 0,
+      targetDate: initiative.targetDate ? new Date(initiative.targetDate) : null,
+      slugId: initiative.slugId ?? null,
+    },
+    create: {
+      id: initiative.id,
+      name: initiative.name,
+      description: initiative.description ?? null,
+      color: initiative.color ?? null,
+      icon: initiative.icon ?? null,
+      status: initiative.status.toLowerCase(),
+      sortOrder: initiative.sortOrder ?? 0,
+      targetDate: initiative.targetDate ? new Date(initiative.targetDate) : null,
+      slugId: initiative.slugId ?? null,
+    },
+  })
+
+  const incomingProjectIds = new Set(initiative.projects.nodes.map((p) => p.id))
+
+  for (const projectNode of initiative.projects.nodes) {
+    await prisma.initiativeToProject.upsert({
+      where: {
+        initiativeId_projectId: {
+          initiativeId: initiative.id,
+          projectId: projectNode.id,
+        },
       },
+      update: { sortOrder: projectNode.sortOrder ?? 0 },
       create: {
-        id: team.id,
-        name: team.name,
-        key: team.key,
-        description: team.description ?? null,
-        color: team.color ?? null,
+        id: `${initiative.id}:${projectNode.id}`,
+        initiativeId: initiative.id,
+        projectId: projectNode.id,
+        sortOrder: projectNode.sortOrder ?? 0,
       },
     })
   }
 
-  console.log(`[sync] Upserted ${teams.nodes.length} teams.`)
+  await prisma.initiativeToProject.deleteMany({
+    where: {
+      initiativeId: initiative.id,
+      projectId: { notIn: [...incomingProjectIds] },
+    },
+  })
+
+  console.log(`[sync] Upserted initiative ${initiative.id}.`)
+}
+
+// ---------------------------------------------------------------------------
+// Teams
+// ---------------------------------------------------------------------------
+
+const TEAMS_QUERY = `
+  query SyncTeams($first: Int!, $after: String) {
+    teams(first: $first, after: $after) {
+      nodes {
+        id
+        name
+        key
+        description
+        color
+      }
+      pageInfo {
+        hasNextPage
+        endCursor
+      }
+    }
+  }
+`
+
+type TeamsQueryResult = {
+  teams: {
+    nodes: Array<{
+      id: string
+      name: string
+      key: string
+      description: string | null
+      color: string | null
+    }>
+    pageInfo: { hasNextPage: boolean; endCursor: string | null }
+  }
+}
+
+async function _syncTeams() {
+  console.log('[sync] Fetching teams...')
+
+  let hasNextPage = true
+  let endCursor: string | undefined
+  let total = 0
+
+  while (hasNextPage) {
+    const result = await linear.client.request<TeamsQueryResult>(
+      TEAMS_QUERY,
+      { first: 50, after: endCursor ?? null },
+    )
+
+    const { nodes: teams, pageInfo } = result.teams
+
+    for (const team of teams) {
+      await prisma.team.upsert({
+        where: { id: team.id },
+        update: {
+          name: team.name,
+          key: team.key,
+          description: team.description ?? null,
+          color: team.color ?? null,
+        },
+        create: {
+          id: team.id,
+          name: team.name,
+          key: team.key,
+          description: team.description ?? null,
+          color: team.color ?? null,
+        },
+      })
+    }
+
+    total += teams.length
+    hasNextPage = pageInfo.hasNextPage
+    endCursor = pageInfo.endCursor ?? undefined
+  }
+
+  console.log(`[sync] Upserted ${total} teams.`)
 }
 
 // ---------------------------------------------------------------------------
@@ -184,6 +503,9 @@ type ProjectsQueryResult = {
 }
 
 async function _syncProjects() {
+  // Teams must exist before projects due to the FK constraint on teamId
+  await _syncTeams()
+
   console.log('[sync] Fetching projects...')
 
   let hasNextPage = true
@@ -319,6 +641,7 @@ async function _syncIssues() {
           priorityName: issue.priorityLabel,
           estimate: issue.estimate ?? null,
           dueDate: issue.dueDate ? new Date(issue.dueDate) : null,
+          startedAt: issue.startedAt ?? null,
           completedAt: issue.completedAt ? new Date(issue.completedAt) : null,
           cancelledAt: issue.cancelledAt ? new Date(issue.cancelledAt) : null,
           url: issue.url,
@@ -340,6 +663,7 @@ async function _syncIssues() {
           priorityName: issue.priorityLabel,
           estimate: issue.estimate ?? null,
           dueDate: issue.dueDate ? new Date(issue.dueDate) : null,
+          startedAt: issue.startedAt ?? null,
           completedAt: issue.completedAt ? new Date(issue.completedAt) : null,
           cancelledAt: issue.cancelledAt ? new Date(issue.cancelledAt) : null,
           url: issue.url,
@@ -358,6 +682,135 @@ async function _syncIssues() {
   }
 
   console.log(`[sync] Upserted ${total} issues.`)
+}
+
+// ---------------------------------------------------------------------------
+// Initiatives
+// ---------------------------------------------------------------------------
+
+const INITIATIVES_QUERY = `
+  query SyncInitiatives($first: Int!, $after: String) {
+    initiatives(first: $first, after: $after) {
+      nodes {
+        id
+        name
+        description
+        color
+        icon
+        status
+        sortOrder
+        targetDate
+        slugId
+        projects {
+          nodes {
+            id
+            sortOrder
+          }
+        }
+      }
+      pageInfo {
+        hasNextPage
+        endCursor
+      }
+    }
+  }
+`
+
+type InitiativesQueryResult = {
+  initiatives: {
+    nodes: Array<{
+      id: string
+      name: string
+      description: string | null
+      color: string | null
+      icon: string | null
+      status: string
+      sortOrder: number
+      targetDate: string | null
+      slugId: string | null
+      projects: { nodes: Array<{ id: string; sortOrder: number }> }
+    }>
+    pageInfo: { hasNextPage: boolean; endCursor: string | null }
+  }
+}
+
+async function _syncInitiatives() {
+  console.log('[sync] Fetching initiatives...')
+
+  let hasNextPage = true
+  let endCursor: string | undefined
+  let total = 0
+
+  while (hasNextPage) {
+    const result = await linear.client.request<InitiativesQueryResult>(
+      INITIATIVES_QUERY,
+      { first: 50, after: endCursor ?? null },
+    )
+
+    const { nodes: initiatives, pageInfo } = result.initiatives
+
+    for (const initiative of initiatives) {
+      await prisma.initiative.upsert({
+        where: { id: initiative.id },
+        update: {
+          name: initiative.name,
+          description: initiative.description ?? null,
+          color: initiative.color ?? null,
+          icon: initiative.icon ?? null,
+          status: initiative.status.toLowerCase(),
+          sortOrder: initiative.sortOrder ?? 0,
+          targetDate: initiative.targetDate ? new Date(initiative.targetDate) : null,
+          slugId: initiative.slugId ?? null,
+        },
+        create: {
+          id: initiative.id,
+          name: initiative.name,
+          description: initiative.description ?? null,
+          color: initiative.color ?? null,
+          icon: initiative.icon ?? null,
+          status: initiative.status.toLowerCase(),
+          sortOrder: initiative.sortOrder ?? 0,
+          targetDate: initiative.targetDate ? new Date(initiative.targetDate) : null,
+          slugId: initiative.slugId ?? null,
+        },
+      })
+
+      // Sync project associations — upsert each join row, then prune stale ones
+      const incomingProjectIds = new Set(initiative.projects.nodes.map((p) => p.id))
+
+      for (const projectNode of initiative.projects.nodes) {
+        await prisma.initiativeToProject.upsert({
+          where: {
+            initiativeId_projectId: {
+              initiativeId: initiative.id,
+              projectId: projectNode.id,
+            },
+          },
+          update: { sortOrder: projectNode.sortOrder ?? 0 },
+          create: {
+            id: `${initiative.id}:${projectNode.id}`,
+            initiativeId: initiative.id,
+            projectId: projectNode.id,
+            sortOrder: projectNode.sortOrder ?? 0,
+          },
+        })
+      }
+
+      // Delete join rows that are no longer present in Linear
+      await prisma.initiativeToProject.deleteMany({
+        where: {
+          initiativeId: initiative.id,
+          projectId: { notIn: [...incomingProjectIds] },
+        },
+      })
+    }
+
+    total += initiatives.length
+    hasNextPage = pageInfo.hasNextPage
+    endCursor = pageInfo.endCursor ?? undefined
+  }
+
+  console.log(`[sync] Upserted ${total} initiatives.`)
 }
 
 // ---------------------------------------------------------------------------

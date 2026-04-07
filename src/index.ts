@@ -1,6 +1,7 @@
 import "dotenv/config";
 import Fastify from "fastify";
 import cors from "@fastify/cors";
+import rawBody from "fastify-raw-body";
 import { roadmapRoutes } from "./routes/roadmap.js";
 import { webhookRoutes } from "./routes/webhook.js";
 import { prisma } from "./db/client.js";
@@ -13,6 +14,8 @@ const app = Fastify({
         : undefined,
   },
 });
+
+await app.register(rawBody, { global: false });
 
 // Allow Astro sites to fetch from this service during development
 await app.register(cors, {

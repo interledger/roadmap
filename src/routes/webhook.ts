@@ -1,6 +1,6 @@
 import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify'
 import { createHmac, timingSafeEqual } from 'crypto'
-import { syncAll, syncTeams, syncProjects, syncIssues, triggerDeploys } from '../linear/sync.js'
+import { syncAll, syncTeams, syncProjects, syncIssues, syncInitiatives, syncSingleProject, syncSingleIssue, syncSingleInitiative, triggerDeploys } from '../linear/sync.js'
 
 // Linear sends webhooks for these action types
 const RELEVANT_ACTIONS = new Set([
@@ -15,6 +15,8 @@ const RELEVANT_TYPES = new Set([
   'Project',
   'ProjectMilestone',
   'IssueLabel',
+  'Initiative',
+  'InitiativeToProject',
 ])
 
 function requireAuth(request: FastifyRequest, reply: FastifyReply): boolean {
@@ -81,32 +83,40 @@ export async function webhookRoutes(app: FastifyInstance) {
       const payload = request.body as {
         type?: string
         action?: string
-        data?: unknown
+        data?: { id?: string; projectId?: string; initiativeId?: string }
       }
 
-      const { type, action } = payload
+      const { type, action, data } = payload
 
       app.log.info({ type, action }, 'Linear webhook received')
 
       // Acknowledge immediately — Linear expects a fast 200
       reply.status(200).send({ received: true })
 
-      // Route to the minimal targeted sync based on what changed
+      // Route to the most targeted sync available based on what changed
       if (
         type && RELEVANT_TYPES.has(type) &&
         action && RELEVANT_ACTIONS.has(action)
       ) {
         let syncFn: () => Promise<void>
 
-        if (type === 'Issue' || type === 'IssueLabel') {
+        if (type === 'Issue') {
+          syncFn = data?.id ? () => syncSingleIssue(data.id!) : syncIssues
+        } else if (type === 'IssueLabel') {
           syncFn = syncIssues
-        } else if (type === 'Project' || type === 'ProjectMilestone') {
-          syncFn = syncProjects
+        } else if (type === 'Project') {
+          syncFn = data?.id ? () => syncSingleProject(data.id!) : syncProjects
+        } else if (type === 'ProjectMilestone') {
+          syncFn = data?.projectId ? () => syncSingleProject(data.projectId!) : syncProjects
+        } else if (type === 'Initiative') {
+          syncFn = data?.id ? () => syncSingleInitiative(data.id!) : syncInitiatives
+        } else if (type === 'InitiativeToProject') {
+          syncFn = data?.initiativeId ? () => syncSingleInitiative(data.initiativeId!) : syncInitiatives
         } else {
           syncFn = syncAll
         }
 
-        app.log.info({ type, action }, 'Triggering targeted sync...')
+        app.log.info({ type, action, entityId: data?.id }, 'Triggering targeted sync...')
 
         syncFn()
           .then(() => triggerDeploys())
