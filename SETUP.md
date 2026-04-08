@@ -119,6 +119,144 @@ ROADMAP_API_URL=https://your-service.com
 
 ---
 
+## RoadmapBoard Astro Component
+
+### Data shape
+
+Fetch the `board` field from the roadmap JSON — it's a pre-joined hierarchy ready for rendering:
+
+```
+BoardRow (initiative)
+  └─ BoardProject[]
+       └─ BoardMilestone[]
+```
+
+**BoardRow** (one row per initiative)
+| Field | Type | Notes |
+|---|---|---|
+| `id` | string | |
+| `name` | string | |
+| `color` | string \| null | Use as row background tint |
+| `icon` | string \| null | |
+| `status` | string | `planned` \| `active` \| `completed` |
+| `startDate` | string \| null | ISO — earliest project start |
+| `targetDate` | string \| null | ISO |
+| `projects` | BoardProject[] | Ordered by `sortOrder` from Linear |
+
+**BoardProject** (label chip on its own sub-row)
+| Field | Type | Notes |
+|---|---|---|
+| `id` | string | |
+| `name` | string | |
+| `color` | string \| null | Use as label background |
+| `state` | string | `planned` \| `started` \| `paused` \| `completed` \| `cancelled` |
+| `icon` | string \| null | |
+| `progress` | number | 0–100 |
+| `startDate` | string \| null | ISO |
+| `targetDate` | string \| null | ISO |
+| `url` | string \| null | Link to Linear project |
+| `milestones` | BoardMilestone[] | Ordered by `sortOrder` |
+
+**BoardMilestone** (label chip along the timeline)
+| Field | Type | Notes |
+|---|---|---|
+| `id` | string | |
+| `name` | string | |
+| `sortOrder` | number | |
+| `startDate` | string \| null | ISO — **inherited from parent project** |
+| `targetDate` | string \| null | ISO |
+| `color` | string \| null | **Inherited from parent project** — use as label background |
+
+---
+
+### Visual rendering spec
+
+```
+Visual layout:
+┌──────────────────────────────────────────────────────────────────────┐
+│ [sticky label col 240px] │ [Q1 2025] │ [Q2 2025] │ … │ [Q4 2027]   │
+├──────────────────────────┼────────────────────────────────────────── │
+│ ■ Initiative name        │ ─────── colored band across all cols ─── │
+│   [Project chip ↗]       │     ░░░░░░░░░░ milestone chips ░░░░░░░░░ │
+│   ├─ Milestone A name    │              [████ Milestone A ████]      │
+│   └─ Milestone B name    │                      [███ B ███]         │
+│   [Project chip 2 ↗]     │                                          │
+│   └─ Milestone C         │         [████████████ C ███████████]     │
+└──────────────────────────────────────────────────────────────────────┘
+```
+
+- **Initiative row** — full-width band; apply `initiative.color` at ~15% opacity as `background-color`
+- **Project label** — chip/pill on its own sub-row; `background-color: project.color`; links to `project.url`
+- **Milestone chips** — positioned along a timeline axis using `startDate` (left edge) → `targetDate` (right edge); `background-color: project.color` (inherited); display `milestone.name`
+
+---
+
+### Component props & usage
+
+```typescript
+// types (import from your roadmap API types or copy locally)
+interface BoardMilestone {
+  id: string; name: string; sortOrder: number
+  startDate: string | null; targetDate: string | null; color: string | null
+}
+interface BoardProject {
+  id: string; name: string; color: string | null; state: string
+  icon: string | null; progress: number
+  startDate: string | null; targetDate: string | null; url: string | null
+  milestones: BoardMilestone[]
+}
+interface BoardRow {
+  id: string; name: string; description: string | null
+  color: string | null; icon: string | null; status: string
+  startDate: string | null; targetDate: string | null
+  projects: BoardProject[]
+}
+```
+
+```astro
+---
+// src/pages/roadmap.astro
+const res = await fetch(import.meta.env.ROADMAP_API_URL + '/api/roadmap.json')
+const { board } = await res.json()
+---
+
+<RoadmapBoard board={board} />
+```
+
+```astro
+---
+// src/components/RoadmapBoard.astro
+interface Props { board: BoardRow[] }
+const { board } = Astro.props
+---
+
+{board.map((row) => (
+  <div class="initiative-row" style={`background-color: ${row.color}26`}>
+    <span class="initiative-name">{row.icon} {row.name}</span>
+    {row.projects.map((project) => (
+      <div class="project-row">
+        <a class="project-label" href={project.url ?? '#'}
+           style={`background-color: ${project.color}`}>
+          {project.icon} {project.name}
+        </a>
+        <div class="milestones-timeline">
+          {project.milestones.map((ms) => (
+            <span class="milestone-chip"
+                  style={`background-color: ${ms.color}`}
+                  data-start={ms.startDate}
+                  data-end={ms.targetDate}>
+              {ms.name}
+            </span>
+          ))}
+        </div>
+      </div>
+    ))}
+  </div>
+))}
+```
+
+---
+
 ## Deployment (Railway recommended)
 
 1. Push this folder to its own Git repo

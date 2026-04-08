@@ -1,6 +1,6 @@
-import 'dotenv/config'
-import { linear } from './client.js'
-import { prisma } from '../db/client.js'
+import "dotenv/config";
+import { linear } from "./client.js";
+import { prisma } from "../db/client.js";
 
 // ---------------------------------------------------------------------------
 // Concurrency guard — prevents multiple simultaneous syncs of the same type.
@@ -9,30 +9,34 @@ import { prisma } from '../db/client.js'
 // This coalesces any number of queued requests into at most one follow-up run.
 // ---------------------------------------------------------------------------
 
-type SyncType = 'teams' | 'projects' | 'issues' | 'initiatives' | 'all'
+type SyncType = "teams" | "projects" | "issues" | "initiatives" | "all";
 
-const syncState = new Map<SyncType, { running: boolean; pending: boolean }>()
+const syncState = new Map<SyncType, { running: boolean; pending: boolean }>();
 
 function getState(type: SyncType) {
-  if (!syncState.has(type)) syncState.set(type, { running: false, pending: false })
-  return syncState.get(type)!
+  if (!syncState.has(type))
+    syncState.set(type, { running: false, pending: false });
+  return syncState.get(type)!;
 }
 
-async function runWithGuard(type: SyncType, fn: () => Promise<void>): Promise<void> {
-  const state = getState(type)
+async function runWithGuard(
+  type: SyncType,
+  fn: () => Promise<void>,
+): Promise<void> {
+  const state = getState(type);
   if (state.running) {
-    state.pending = true
-    return
+    state.pending = true;
+    return;
   }
-  state.running = true
-  state.pending = false
+  state.running = true;
+  state.pending = false;
   try {
-    await fn()
+    await fn();
   } finally {
-    state.running = false
+    state.running = false;
     if (state.pending) {
-      state.pending = false
-      setImmediate(() => runWithGuard(type, fn))
+      state.pending = false;
+      setImmediate(() => runWithGuard(type, fn));
     }
   }
 }
@@ -48,38 +52,38 @@ async function runWithGuard(type: SyncType, fn: () => Promise<void>): Promise<vo
  * Safe to run multiple times — all operations are upserts.
  */
 export async function syncAll(): Promise<void> {
-  return runWithGuard('all', async () => {
-    console.log('[sync] Starting full Linear sync...')
+  return runWithGuard("all", async () => {
+    console.log("[sync] Starting full Linear sync...");
 
     await prisma.syncMeta.upsert({
       where: { id: 1 },
-      update: { status: 'running', error: null },
-      create: { id: 1, status: 'running' },
-    })
+      update: { status: "running", error: null },
+      create: { id: 1, status: "running" },
+    });
 
     try {
-      await _syncProjects() // also syncs teams first (FK dependency)
-      await _syncIssues()
-      await _syncInitiatives()
+      await _syncProjects(); // also syncs teams first (FK dependency)
+      await _syncIssues();
+      await _syncInitiatives();
 
       await prisma.syncMeta.update({
         where: { id: 1 },
-        data: { status: 'idle', lastSyncAt: new Date() },
-      })
+        data: { status: "idle", lastSyncAt: new Date() },
+      });
 
-      console.log('[sync] Done.')
+      console.log("[sync] Done.");
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err)
-      console.error('[sync] Error:', message)
+      const message = err instanceof Error ? err.message : String(err);
+      console.error("[sync] Error:", message);
 
       await prisma.syncMeta.update({
         where: { id: 1 },
-        data: { status: 'error', error: message },
-      })
+        data: { status: "error", error: message },
+      });
 
-      throw err
+      throw err;
     }
-  })
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -88,22 +92,22 @@ export async function syncAll(): Promise<void> {
 
 /** Sync only teams. */
 export async function syncTeams(): Promise<void> {
-  return runWithGuard('teams', _syncTeams)
+  return runWithGuard("teams", _syncTeams);
 }
 
 /** Sync only projects and their milestones. */
 export async function syncProjects(): Promise<void> {
-  return runWithGuard('projects', _syncProjects)
+  return runWithGuard("projects", _syncProjects);
 }
 
 /** Sync only issues (and their labels). */
 export async function syncIssues(): Promise<void> {
-  return runWithGuard('issues', _syncIssues)
+  return runWithGuard("issues", _syncIssues);
 }
 
 /** Sync only initiatives (and their project associations). */
 export async function syncInitiatives(): Promise<void> {
-  return runWithGuard('initiatives', _syncInitiatives)
+  return runWithGuard("initiatives", _syncInitiatives);
 }
 
 // ---------------------------------------------------------------------------
@@ -128,38 +132,39 @@ const SINGLE_PROJECT_QUERY = `
       }
     }
   }
-`
+`;
 
 type SingleProjectQueryResult = {
   project: {
-    id: string
-    name: string
-    description: string | null
-    state: string
-    color: string | null
-    icon: string | null
-    startDate: string | null
-    targetDate: string | null
-    progress: number
-    url: string
-    teams: { nodes: Array<{ id: string }> }
-  } | null
-}
+    id: string;
+    name: string;
+    description: string | null;
+    state: string;
+    color: string | null;
+    icon: string | null;
+    startDate: string | null;
+    targetDate: string | null;
+    progress: number;
+    url: string;
+    teams: { nodes: Array<{ id: string }> };
+  } | null;
+};
 
 /** Sync a single project (and its milestones) by ID. */
 export async function syncSingleProject(id: string): Promise<void> {
   const result = await linear.client.request<SingleProjectQueryResult>(
     SINGLE_PROJECT_QUERY,
     { id },
-  )
-
-  const project = result.project
+  );
+  console.log(`[sync] Syncing project ${id}...`);
+  console.log(`[sync] Project data:`, JSON.stringify(result.project, null, 2));
+  const project = result.project;
   if (!project) {
-    console.log(`[sync] Project ${id} not found in Linear, skipping.`)
-    return
+    console.log(`[sync] Project ${id} not found in Linear, skipping.`);
+    return;
   }
 
-  const teamId = project.teams.nodes[0]?.id ?? null
+  const teamId = project.teams.nodes[0]?.id ?? null;
 
   await prisma.project.upsert({
     where: { id: project.id },
@@ -188,34 +193,39 @@ export async function syncSingleProject(id: string): Promise<void> {
       url: project.url,
       teamId,
     },
-  })
+  });
 
-  await syncMilestonesForProject(project.id)
-  console.log(`[sync] Upserted project ${project.id}.`)
+  await syncMilestonesForProject(project.id);
+  console.log(`[sync] Upserted project ${project.id}.`);
 }
 
 /** Sync a single issue (and its labels) by ID. */
 export async function syncSingleIssue(id: string): Promise<void> {
-  const issue = await linear.issue(id)
+  const issue = await linear.issue(id);
   if (!issue) {
-    console.log(`[sync] Issue ${id} not found in Linear, skipping.`)
-    return
+    console.log(`[sync] Issue ${id} not found in Linear, skipping.`);
+    return;
   }
 
-  const state = await issue.state
-  const assignee = await issue.assignee
-  const issueLabels = await issue.labels()
-  const projectId = (await issue.project)?.id ?? null
-  const milestoneId = (await issue.projectMilestone)?.id ?? null
+  const state = await issue.state;
+  const assignee = await issue.assignee;
+  const issueLabels = await issue.labels();
+  const projectId = (await issue.project)?.id ?? null;
+  const milestoneId = (await issue.projectMilestone)?.id ?? null;
 
-  const labelIds: string[] = []
+  // Ensure the milestone exists in DB before upserting the issue (FK constraint)
+  if (milestoneId && projectId) {
+    await syncMilestonesForProject(projectId);
+  }
+
+  const labelIds: string[] = [];
   for (const label of issueLabels.nodes) {
     await prisma.label.upsert({
       where: { id: label.id },
       update: { name: label.name, color: label.color ?? null },
       create: { id: label.id, name: label.name, color: label.color ?? null },
-    })
-    labelIds.push(label.id)
+    });
+    labelIds.push(label.id);
   }
 
   await prisma.issue.upsert({
@@ -223,8 +233,8 @@ export async function syncSingleIssue(id: string): Promise<void> {
     update: {
       title: issue.title,
       description: issue.description ?? null,
-      state: state?.type ?? 'unstarted',
-      stateName: state?.name ?? '',
+      state: state?.type ?? "unstarted",
+      stateName: state?.name ?? "",
       stateColor: state?.color ?? null,
       stateType: state?.type ?? null,
       priority: issue.priority ?? 0,
@@ -245,8 +255,8 @@ export async function syncSingleIssue(id: string): Promise<void> {
       id: issue.id,
       title: issue.title,
       description: issue.description ?? null,
-      state: state?.type ?? 'unstarted',
-      stateName: state?.name ?? '',
+      state: state?.type ?? "unstarted",
+      stateName: state?.name ?? "",
       stateColor: state?.color ?? null,
       stateType: state?.type ?? null,
       priority: issue.priority ?? 0,
@@ -263,9 +273,9 @@ export async function syncSingleIssue(id: string): Promise<void> {
       assigneeName: assignee?.name ?? null,
       labels: { connect: labelIds.map((id) => ({ id })) },
     },
-  })
+  });
 
-  console.log(`[sync] Upserted issue ${issue.id}.`)
+  console.log(`[sync] Upserted issue ${issue.id}.`);
 }
 
 const SINGLE_INITIATIVE_QUERY = `
@@ -288,34 +298,39 @@ const SINGLE_INITIATIVE_QUERY = `
       }
     }
   }
-`
+`;
 
 type SingleInitiativeQueryResult = {
   initiative: {
-    id: string
-    name: string
-    description: string | null
-    color: string | null
-    icon: string | null
-    status: string
-    sortOrder: number
-    targetDate: string | null
-    slugId: string | null
-    projects: { nodes: Array<{ id: string; sortOrder: number }> }
-  } | null
-}
+    id: string;
+    name: string;
+    description: string | null;
+    color: string | null;
+    icon: string | null;
+    status: string;
+    sortOrder: number;
+    targetDate: string | null;
+    slugId: string | null;
+    projects: { nodes: Array<{ id: string; sortOrder: number }> };
+  } | null;
+};
 
 /** Sync a single initiative (and its project associations) by ID. */
 export async function syncSingleInitiative(id: string): Promise<void> {
   const result = await linear.client.request<SingleInitiativeQueryResult>(
     SINGLE_INITIATIVE_QUERY,
     { id },
-  )
+  );
 
-  const initiative = result.initiative
+  console.log(`[sync] Syncing initiative ${id}...`);
+  console.log(
+    `[sync] Initiative data:`,
+    JSON.stringify(result.initiative, null, 2),
+  );
+  const initiative = result.initiative;
   if (!initiative) {
-    console.log(`[sync] Initiative ${id} not found in Linear, skipping.`)
-    return
+    console.log(`[sync] Initiative ${id} not found in Linear, skipping.`);
+    return;
   }
 
   await prisma.initiative.upsert({
@@ -327,7 +342,9 @@ export async function syncSingleInitiative(id: string): Promise<void> {
       icon: initiative.icon ?? null,
       status: initiative.status.toLowerCase(),
       sortOrder: initiative.sortOrder ?? 0,
-      targetDate: initiative.targetDate ? new Date(initiative.targetDate) : null,
+      targetDate: initiative.targetDate
+        ? new Date(initiative.targetDate)
+        : null,
       slugId: initiative.slugId ?? null,
     },
     create: {
@@ -338,12 +355,16 @@ export async function syncSingleInitiative(id: string): Promise<void> {
       icon: initiative.icon ?? null,
       status: initiative.status.toLowerCase(),
       sortOrder: initiative.sortOrder ?? 0,
-      targetDate: initiative.targetDate ? new Date(initiative.targetDate) : null,
+      targetDate: initiative.targetDate
+        ? new Date(initiative.targetDate)
+        : null,
       slugId: initiative.slugId ?? null,
     },
-  })
+  });
 
-  const incomingProjectIds = new Set(initiative.projects.nodes.map((p) => p.id))
+  const incomingProjectIds = new Set(
+    initiative.projects.nodes.map((p) => p.id),
+  );
 
   for (const projectNode of initiative.projects.nodes) {
     await prisma.initiativeToProject.upsert({
@@ -360,7 +381,7 @@ export async function syncSingleInitiative(id: string): Promise<void> {
         projectId: projectNode.id,
         sortOrder: projectNode.sortOrder ?? 0,
       },
-    })
+    });
   }
 
   await prisma.initiativeToProject.deleteMany({
@@ -368,9 +389,127 @@ export async function syncSingleInitiative(id: string): Promise<void> {
       initiativeId: initiative.id,
       projectId: { notIn: [...incomingProjectIds] },
     },
-  })
+  });
 
-  console.log(`[sync] Upserted initiative ${initiative.id}.`)
+  console.log(`[sync] Upserted initiative ${initiative.id}.`);
+}
+
+const SINGLE_MILESTONE_QUERY = `
+  query SyncSingleMilestone($id: String!) {
+    projectMilestone(id: $id) {
+      id
+      name
+      description
+      targetDate
+      sortOrder
+      project { id }
+    }
+  }
+`;
+
+type SingleMilestoneQueryResult = {
+  projectMilestone: {
+    id: string;
+    name: string;
+    description: string | null;
+    targetDate: string | null;
+    sortOrder: number;
+    project: { id: string };
+  } | null;
+};
+
+/** Sync a single milestone by ID. */
+export async function syncSingleMilestone(id: string): Promise<void> {
+  const result = await linear.client.request<SingleMilestoneQueryResult>(
+    SINGLE_MILESTONE_QUERY,
+    { id },
+  );
+
+  const milestone = result.projectMilestone;
+  if (!milestone) {
+    console.log(`[sync] Milestone ${id} not found in Linear, skipping.`);
+    return;
+  }
+
+  await prisma.milestone.upsert({
+    where: { id: milestone.id },
+    update: {
+      name: milestone.name,
+      description: milestone.description ?? null,
+      targetDate: milestone.targetDate ? new Date(milestone.targetDate) : null,
+      sortOrder: milestone.sortOrder ?? 0,
+      projectId: milestone.project.id,
+    },
+    create: {
+      id: milestone.id,
+      name: milestone.name,
+      description: milestone.description ?? null,
+      targetDate: milestone.targetDate ? new Date(milestone.targetDate) : null,
+      sortOrder: milestone.sortOrder ?? 0,
+      projectId: milestone.project.id,
+    },
+  });
+
+  console.log(`[sync] Upserted milestone ${milestone.id}.`);
+}
+
+// ---------------------------------------------------------------------------
+// Single-entity team sync
+// ---------------------------------------------------------------------------
+
+const SINGLE_TEAM_QUERY = `
+  query SyncSingleTeam($id: String!) {
+    team(id: $id) {
+      id
+      name
+      key
+      description
+      color
+    }
+  }
+`;
+
+type SingleTeamQueryResult = {
+  team: {
+    id: string;
+    name: string;
+    key: string;
+    description: string | null;
+    color: string | null;
+  } | null;
+};
+
+/** Sync a single team by ID. */
+export async function syncSingleTeam(id: string): Promise<void> {
+  const result = await linear.client.request<SingleTeamQueryResult>(
+    SINGLE_TEAM_QUERY,
+    { id },
+  );
+  console.log(`[sync] Syncing team ${id}...`);
+  const team = result.team;
+  if (!team) {
+    console.log(`[sync] Team ${id} not found in Linear, skipping.`);
+    return;
+  }
+
+  await prisma.team.upsert({
+    where: { id: team.id },
+    update: {
+      name: team.name,
+      key: team.key,
+      description: team.description ?? null,
+      color: team.color ?? null,
+    },
+    create: {
+      id: team.id,
+      name: team.name,
+      key: team.key,
+      description: team.description ?? null,
+      color: team.color ?? null,
+    },
+  });
+
+  console.log(`[sync] Upserted team ${team.id}.`);
 }
 
 // ---------------------------------------------------------------------------
@@ -393,35 +532,35 @@ const TEAMS_QUERY = `
       }
     }
   }
-`
+`;
 
 type TeamsQueryResult = {
   teams: {
     nodes: Array<{
-      id: string
-      name: string
-      key: string
-      description: string | null
-      color: string | null
-    }>
-    pageInfo: { hasNextPage: boolean; endCursor: string | null }
-  }
-}
+      id: string;
+      name: string;
+      key: string;
+      description: string | null;
+      color: string | null;
+    }>;
+    pageInfo: { hasNextPage: boolean; endCursor: string | null };
+  };
+};
 
 async function _syncTeams() {
-  console.log('[sync] Fetching teams...')
+  console.log("[sync] Fetching teams...");
 
-  let hasNextPage = true
-  let endCursor: string | undefined
-  let total = 0
+  let hasNextPage = true;
+  let endCursor: string | undefined;
+  let total = 0;
 
   while (hasNextPage) {
-    const result = await linear.client.request<TeamsQueryResult>(
-      TEAMS_QUERY,
-      { first: 50, after: endCursor ?? null },
-    )
+    const result = await linear.client.request<TeamsQueryResult>(TEAMS_QUERY, {
+      first: 50,
+      after: endCursor ?? null,
+    });
 
-    const { nodes: teams, pageInfo } = result.teams
+    const { nodes: teams, pageInfo } = result.teams;
 
     for (const team of teams) {
       await prisma.team.upsert({
@@ -439,15 +578,15 @@ async function _syncTeams() {
           description: team.description ?? null,
           color: team.color ?? null,
         },
-      })
+      });
     }
 
-    total += teams.length
-    hasNextPage = pageInfo.hasNextPage
-    endCursor = pageInfo.endCursor ?? undefined
+    total += teams.length;
+    hasNextPage = pageInfo.hasNextPage;
+    endCursor = pageInfo.endCursor ?? undefined;
   }
 
-  console.log(`[sync] Upserted ${total} teams.`)
+  console.log(`[sync] Upserted ${total} teams.`);
 }
 
 // ---------------------------------------------------------------------------
@@ -481,47 +620,47 @@ const PROJECTS_QUERY = `
       }
     }
   }
-`
+`;
 
 type ProjectsQueryResult = {
   projects: {
     nodes: Array<{
-      id: string
-      name: string
-      description: string | null
-      state: string
-      color: string | null
-      icon: string | null
-      startDate: string | null
-      targetDate: string | null
-      progress: number
-      url: string
-      teams: { nodes: Array<{ id: string }> }
-    }>
-    pageInfo: { hasNextPage: boolean; endCursor: string | null }
-  }
-}
+      id: string;
+      name: string;
+      description: string | null;
+      state: string;
+      color: string | null;
+      icon: string | null;
+      startDate: string | null;
+      targetDate: string | null;
+      progress: number;
+      url: string;
+      teams: { nodes: Array<{ id: string }> };
+    }>;
+    pageInfo: { hasNextPage: boolean; endCursor: string | null };
+  };
+};
 
 async function _syncProjects() {
   // Teams must exist before projects due to the FK constraint on teamId
-  await _syncTeams()
+  await _syncTeams();
 
-  console.log('[sync] Fetching projects...')
+  console.log("[sync] Fetching projects...");
 
-  let hasNextPage = true
-  let endCursor: string | undefined
-  let total = 0
+  let hasNextPage = true;
+  let endCursor: string | undefined;
+  let total = 0;
 
   while (hasNextPage) {
     const result = await linear.client.request<ProjectsQueryResult>(
       PROJECTS_QUERY,
       { first: 50, after: endCursor ?? null },
-    )
+    );
 
-    const { nodes: projects, pageInfo } = result.projects
+    const { nodes: projects, pageInfo } = result.projects;
 
     for (const project of projects) {
-      const teamId = project.teams.nodes[0]?.id ?? null
+      const teamId = project.teams.nodes[0]?.id ?? null;
 
       await prisma.project.upsert({
         where: { id: project.id },
@@ -550,22 +689,22 @@ async function _syncProjects() {
           url: project.url,
           teamId,
         },
-      })
+      });
 
-      await syncMilestonesForProject(project.id)
+      await syncMilestonesForProject(project.id);
     }
 
-    total += projects.length
-    hasNextPage = pageInfo.hasNextPage
-    endCursor = pageInfo.endCursor ?? undefined
+    total += projects.length;
+    hasNextPage = pageInfo.hasNextPage;
+    endCursor = pageInfo.endCursor ?? undefined;
   }
 
-  console.log(`[sync] Upserted ${total} projects.`)
+  console.log(`[sync] Upserted ${total} projects.`);
 }
 
 async function syncMilestonesForProject(projectId: string) {
-  const project = await linear.project(projectId)
-  const milestones = await project.projectMilestones()
+  const project = await linear.project(projectId);
+  const milestones = await project.projectMilestones();
 
   for (const milestone of milestones.nodes) {
     await prisma.milestone.upsert({
@@ -573,7 +712,9 @@ async function syncMilestonesForProject(projectId: string) {
       update: {
         name: milestone.name,
         description: milestone.description ?? null,
-        targetDate: milestone.targetDate ? new Date(milestone.targetDate) : null,
+        targetDate: milestone.targetDate
+          ? new Date(milestone.targetDate)
+          : null,
         sortOrder: milestone.sortOrder ?? 0,
         projectId,
       },
@@ -581,11 +722,13 @@ async function syncMilestonesForProject(projectId: string) {
         id: milestone.id,
         name: milestone.name,
         description: milestone.description ?? null,
-        targetDate: milestone.targetDate ? new Date(milestone.targetDate) : null,
+        targetDate: milestone.targetDate
+          ? new Date(milestone.targetDate)
+          : null,
         sortOrder: milestone.sortOrder ?? 0,
         projectId,
       },
-    })
+    });
   }
 }
 
@@ -594,11 +737,12 @@ async function syncMilestonesForProject(projectId: string) {
 // ---------------------------------------------------------------------------
 
 async function _syncIssues() {
-  console.log('[sync] Fetching issues...')
+  console.log("[sync] Fetching issues...");
 
-  let hasNextPage = true
-  let endCursor: string | undefined
-  let total = 0
+  let hasNextPage = true;
+  let endCursor: string | undefined;
+  let total = 0;
+  const syncedMilestoneProjects = new Set<string>();
 
   while (hasNextPage) {
     const issues = await linear.issues({
@@ -608,24 +752,34 @@ async function _syncIssues() {
         // Only fetch issues attached to a project so they're roadmap-relevant
         project: { null: false },
       },
-    })
+    });
 
     for (const issue of issues.nodes) {
-      const state = await issue.state
-      const assignee = await issue.assignee
-      const issueLabels = await issue.labels()
-      const projectId = (await issue.project)?.id ?? null
-      const milestoneId = (await issue.projectMilestone)?.id ?? null
+      const state = await issue.state;
+      const assignee = await issue.assignee;
+      const issueLabels = await issue.labels();
+      const projectId = (await issue.project)?.id ?? null;
+      const milestoneId = (await issue.projectMilestone)?.id ?? null;
+
+      // Ensure the milestone exists in DB before upserting the issue (FK constraint)
+      if (milestoneId && projectId && !syncedMilestoneProjects.has(projectId)) {
+        await syncMilestonesForProject(projectId);
+        syncedMilestoneProjects.add(projectId);
+      }
 
       // Upsert labels
-      const labelIds: string[] = []
+      const labelIds: string[] = [];
       for (const label of issueLabels.nodes) {
         await prisma.label.upsert({
           where: { id: label.id },
           update: { name: label.name, color: label.color ?? null },
-          create: { id: label.id, name: label.name, color: label.color ?? null },
-        })
-        labelIds.push(label.id)
+          create: {
+            id: label.id,
+            name: label.name,
+            color: label.color ?? null,
+          },
+        });
+        labelIds.push(label.id);
       }
 
       await prisma.issue.upsert({
@@ -633,8 +787,8 @@ async function _syncIssues() {
         update: {
           title: issue.title,
           description: issue.description ?? null,
-          state: state?.type ?? 'unstarted',
-          stateName: state?.name ?? '',
+          state: state?.type ?? "unstarted",
+          stateName: state?.name ?? "",
           stateColor: state?.color ?? null,
           stateType: state?.type ?? null,
           priority: issue.priority ?? 0,
@@ -655,8 +809,8 @@ async function _syncIssues() {
           id: issue.id,
           title: issue.title,
           description: issue.description ?? null,
-          state: state?.type ?? 'unstarted',
-          stateName: state?.name ?? '',
+          state: state?.type ?? "unstarted",
+          stateName: state?.name ?? "",
           stateColor: state?.color ?? null,
           stateType: state?.type ?? null,
           priority: issue.priority ?? 0,
@@ -673,15 +827,15 @@ async function _syncIssues() {
           assigneeName: assignee?.name ?? null,
           labels: { connect: labelIds.map((id) => ({ id })) },
         },
-      })
+      });
     }
 
-    total += issues.nodes.length
-    hasNextPage = issues.pageInfo.hasNextPage
-    endCursor = issues.pageInfo.endCursor ?? undefined
+    total += issues.nodes.length;
+    hasNextPage = issues.pageInfo.hasNextPage;
+    endCursor = issues.pageInfo.endCursor ?? undefined;
   }
 
-  console.log(`[sync] Upserted ${total} issues.`)
+  console.log(`[sync] Upserted ${total} issues.`);
 }
 
 // ---------------------------------------------------------------------------
@@ -714,40 +868,40 @@ const INITIATIVES_QUERY = `
       }
     }
   }
-`
+`;
 
 type InitiativesQueryResult = {
   initiatives: {
     nodes: Array<{
-      id: string
-      name: string
-      description: string | null
-      color: string | null
-      icon: string | null
-      status: string
-      sortOrder: number
-      targetDate: string | null
-      slugId: string | null
-      projects: { nodes: Array<{ id: string; sortOrder: number }> }
-    }>
-    pageInfo: { hasNextPage: boolean; endCursor: string | null }
-  }
-}
+      id: string;
+      name: string;
+      description: string | null;
+      color: string | null;
+      icon: string | null;
+      status: string;
+      sortOrder: number;
+      targetDate: string | null;
+      slugId: string | null;
+      projects: { nodes: Array<{ id: string; sortOrder: number }> };
+    }>;
+    pageInfo: { hasNextPage: boolean; endCursor: string | null };
+  };
+};
 
 async function _syncInitiatives() {
-  console.log('[sync] Fetching initiatives...')
+  console.log("[sync] Fetching initiatives...");
 
-  let hasNextPage = true
-  let endCursor: string | undefined
-  let total = 0
+  let hasNextPage = true;
+  let endCursor: string | undefined;
+  let total = 0;
 
   while (hasNextPage) {
     const result = await linear.client.request<InitiativesQueryResult>(
       INITIATIVES_QUERY,
       { first: 50, after: endCursor ?? null },
-    )
+    );
 
-    const { nodes: initiatives, pageInfo } = result.initiatives
+    const { nodes: initiatives, pageInfo } = result.initiatives;
 
     for (const initiative of initiatives) {
       await prisma.initiative.upsert({
@@ -759,7 +913,9 @@ async function _syncInitiatives() {
           icon: initiative.icon ?? null,
           status: initiative.status.toLowerCase(),
           sortOrder: initiative.sortOrder ?? 0,
-          targetDate: initiative.targetDate ? new Date(initiative.targetDate) : null,
+          targetDate: initiative.targetDate
+            ? new Date(initiative.targetDate)
+            : null,
           slugId: initiative.slugId ?? null,
         },
         create: {
@@ -770,13 +926,17 @@ async function _syncInitiatives() {
           icon: initiative.icon ?? null,
           status: initiative.status.toLowerCase(),
           sortOrder: initiative.sortOrder ?? 0,
-          targetDate: initiative.targetDate ? new Date(initiative.targetDate) : null,
+          targetDate: initiative.targetDate
+            ? new Date(initiative.targetDate)
+            : null,
           slugId: initiative.slugId ?? null,
         },
-      })
+      });
 
       // Sync project associations — upsert each join row, then prune stale ones
-      const incomingProjectIds = new Set(initiative.projects.nodes.map((p) => p.id))
+      const incomingProjectIds = new Set(
+        initiative.projects.nodes.map((p) => p.id),
+      );
 
       for (const projectNode of initiative.projects.nodes) {
         await prisma.initiativeToProject.upsert({
@@ -793,7 +953,7 @@ async function _syncInitiatives() {
             projectId: projectNode.id,
             sortOrder: projectNode.sortOrder ?? 0,
           },
-        })
+        });
       }
 
       // Delete join rows that are no longer present in Linear
@@ -802,15 +962,15 @@ async function _syncInitiatives() {
           initiativeId: initiative.id,
           projectId: { notIn: [...incomingProjectIds] },
         },
-      })
+      });
     }
 
-    total += initiatives.length
-    hasNextPage = pageInfo.hasNextPage
-    endCursor = pageInfo.endCursor ?? undefined
+    total += initiatives.length;
+    hasNextPage = pageInfo.hasNextPage;
+    endCursor = pageInfo.endCursor ?? undefined;
   }
 
-  console.log(`[sync] Upserted ${total} initiatives.`)
+  console.log(`[sync] Upserted ${total} initiatives.`);
 }
 
 // ---------------------------------------------------------------------------
@@ -821,31 +981,31 @@ export async function triggerDeploys() {
   const hooks = [
     process.env.DEPLOY_HOOK_SITE_1,
     process.env.DEPLOY_HOOK_SITE_2,
-  ].filter(Boolean) as string[]
+  ].filter(Boolean) as string[];
 
   if (hooks.length === 0) {
-    console.log('[deploy] No deploy hooks configured, skipping.')
-    return
+    console.log("[deploy] No deploy hooks configured, skipping.");
+    return;
   }
 
   await Promise.allSettled(
     hooks.map(async (hook) => {
       try {
-        const res = await fetch(hook, { method: 'POST' })
-        console.log(`[deploy] Hook triggered: ${hook} → ${res.status}`)
+        const res = await fetch(hook, { method: "POST" });
+        console.log(`[deploy] Hook triggered: ${hook} → ${res.status}`);
       } catch (err) {
-        console.error(`[deploy] Hook failed: ${hook}`, err)
+        console.error(`[deploy] Hook failed: ${hook}`, err);
       }
-    })
-  )
+    }),
+  );
 }
 
 // ---------------------------------------------------------------------------
 // Run directly: pnpm sync
 // ---------------------------------------------------------------------------
 
-if (import.meta.url === new URL(process.argv[1], 'file://').href) {
-  await syncAll()
-  await triggerDeploys()
-  await prisma.$disconnect()
+if (import.meta.url === new URL(process.argv[1], "file://").href) {
+  await syncAll();
+  await triggerDeploys();
+  await prisma.$disconnect();
 }

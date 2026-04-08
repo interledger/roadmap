@@ -1,6 +1,7 @@
 import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify'
 import { createHmac, timingSafeEqual } from 'crypto'
 import { syncAll, syncTeams, syncProjects, syncIssues, syncInitiatives, syncSingleProject, syncSingleIssue, syncSingleInitiative, triggerDeploys } from '../linear/sync.js'
+import { prisma } from '../db/client.js'
 
 // Linear sends webhooks for these action types
 const RELEVANT_ACTIONS = new Set([
@@ -107,7 +108,15 @@ export async function webhookRoutes(app: FastifyInstance) {
         } else if (type === 'Project') {
           syncFn = data?.id ? () => syncSingleProject(data.id!) : syncProjects
         } else if (type === 'ProjectMilestone') {
-          syncFn = data?.projectId ? () => syncSingleProject(data.projectId!) : syncProjects
+          let projectId = data?.projectId
+          if (!projectId && data?.id) {
+            const found = await prisma.milestone.findUnique({
+              where: { id: data.id },
+              select: { projectId: true },
+            })
+            projectId = found?.projectId ?? undefined
+          }
+          syncFn = projectId ? () => syncSingleProject(projectId!) : syncProjects
         } else if (type === 'Initiative') {
           syncFn = data?.id ? () => syncSingleInitiative(data.id!) : syncInitiatives
         } else if (type === 'InitiativeToProject') {

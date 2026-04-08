@@ -1,6 +1,6 @@
 import type { FastifyInstance } from 'fastify'
 import { prisma } from '../db/client.js'
-import type { RoadmapSnapshot, RoadmapInitiative } from '../types/roadmap.js'
+import type { RoadmapSnapshot, RoadmapInitiative, BoardRow, BoardProject } from '../types/roadmap.js'
 
 export async function roadmapRoutes(app: FastifyInstance) {
   /**
@@ -78,6 +78,52 @@ export async function roadmapRoutes(app: FastifyInstance) {
           targetDate: i.targetDate?.toISOString() ?? null,
           slugId: i.slugId,
           projectIds: i.projects.map((p) => p.projectId),
+        }
+      }),
+      board: initiatives.map((i): BoardRow => {
+        const childStartDates = i.projects
+          .map((link) => projectById.get(link.projectId)?.startDate)
+          .filter((d): d is Date => d != null)
+        const boardStartDate = childStartDates.length > 0
+          ? new Date(Math.min(...childStartDates.map((d) => d.getTime()))).toISOString()
+          : null
+
+        const boardProjects: BoardProject[] = i.projects
+          .sort((a, b) => a.sortOrder - b.sortOrder)
+          .flatMap((link) => {
+            const p = projectById.get(link.projectId)
+            if (!p) return []
+            return [{
+              id: p.id,
+              name: p.name,
+              color: p.color,
+              state: p.state,
+              icon: p.icon,
+              progress: p.progress,
+              startDate: p.startDate?.toISOString() ?? null,
+              targetDate: p.targetDate?.toISOString() ?? null,
+              url: p.url,
+              milestones: p.milestones.map((m) => ({
+                id: m.id,
+                name: m.name,
+                sortOrder: m.sortOrder,
+                startDate: p.startDate?.toISOString() ?? null,
+                targetDate: m.targetDate?.toISOString() ?? null,
+                color: p.color,
+              })),
+            }]
+          })
+
+        return {
+          id: i.id,
+          name: i.name,
+          description: i.description,
+          color: i.color,
+          icon: i.icon,
+          status: i.status,
+          startDate: boardStartDate,
+          targetDate: i.targetDate?.toISOString() ?? null,
+          projects: boardProjects,
         }
       }),
       projects: projects.map((p) => ({

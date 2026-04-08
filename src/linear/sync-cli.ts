@@ -1,8 +1,9 @@
 import 'dotenv/config'
-import { syncAll, syncTeams, syncProjects, syncIssues, syncInitiatives, triggerDeploys } from './sync.js'
+import { syncAll, syncTeams, syncProjects, syncIssues, syncInitiatives, syncSingleInitiative, syncSingleProject, syncSingleMilestone, syncSingleTeam, triggerDeploys } from './sync.js'
 import { prisma } from '../db/client.js'
 
-const target = process.argv[2] // 'teams' | 'projects' | 'issues' | undefined
+const target = process.argv[2]
+const id = process.argv[3]
 
 async function main() {
   switch (target) {
@@ -18,6 +19,26 @@ async function main() {
     case 'initiatives':
       await syncInitiatives()
       break
+    case 'initiative': {
+      if (!id) { console.error('Usage: sync initiative <id>'); process.exit(1) }
+      await syncSingleInitiative(id)
+      break
+    }
+    case 'project': {
+      if (!id) { console.error('Usage: sync project <id>'); process.exit(1) }
+      await syncSingleProject(id)
+      break
+    }
+    case 'milestone': {
+      if (!id) { console.error('Usage: sync milestone <id>'); process.exit(1) }
+      await syncSingleMilestone(id)
+      break
+    }
+    case 'team': {
+      if (!id) { console.error('Usage: sync team <id>'); process.exit(1) }
+      await syncSingleTeam(id)
+      break
+    }
     default:
       await syncAll()
   }
