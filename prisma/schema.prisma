@@ -17,6 +17,17 @@ model Team {
   updatedAt   DateTime  @updatedAt
 
   projects    Project[]
+  childTeams  TeamChildren[] @relation("ParentTeam")
+  parentTeams TeamChildren[] @relation("ChildTeam")
+}
+
+model TeamChildren {
+  parentId  String
+  childId   String
+  parent    Team @relation("ParentTeam", fields: [parentId], references: [id], onDelete: Cascade)
+  child     Team @relation("ChildTeam", fields: [childId], references: [id], onDelete: Cascade)
+
+  @@id([parentId, childId])
 }
 
 model Project {

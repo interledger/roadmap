@@ -58,6 +58,7 @@ export interface RoadmapTeam {
   name: string
   key: string
   color: string | null
+  childrenIds: string[]
   projectCount: number
 }
 

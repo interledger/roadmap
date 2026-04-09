@@ -465,6 +465,7 @@ const SINGLE_TEAM_QUERY = `
       key
       description
       color
+      children { id }
     }
   }
 `;
@@ -476,16 +477,18 @@ type SingleTeamQueryResult = {
     key: string;
     description: string | null;
     color: string | null;
+    children: Array<{ id: string }>;
   } | null;
 };
 
 /** Sync a single team by ID. */
 export async function syncSingleTeam(id: string): Promise<void> {
-  const result = await linear.client.request<SingleTeamQueryResult>(
+  const result = await linear.client.request<SingleTeamQueryResult, { id: string }>(
     SINGLE_TEAM_QUERY,
     { id },
   );
   console.log(`[sync] Syncing team ${id}...`);
+  console.log(`[sync] Team data:`, JSON.stringify(result.team, null, 2));
   const team = result.team;
   if (!team) {
     console.log(`[sync] Team ${id} not found in Linear, skipping.`);
@@ -509,6 +512,23 @@ export async function syncSingleTeam(id: string): Promise<void> {
     },
   });
 
+  // Sync children relationships.
+  const childIds = team.children.map((c) => c.id);
+  for (const childId of childIds) {
+    await prisma.teamChildren.upsert({
+      where: { parentId_childId: { parentId: team.id, childId } },
+      update: {},
+      create: { parentId: team.id, childId },
+    });
+  }
+  if (childIds.length > 0) {
+    await prisma.teamChildren.deleteMany({
+      where: { parentId: team.id, childId: { notIn: childIds } },
+    });
+  } else {
+    await prisma.teamChildren.deleteMany({ where: { parentId: team.id } });
+  }
+
   console.log(`[sync] Upserted team ${team.id}.`);
 }
 
@@ -525,6 +545,7 @@ const TEAMS_QUERY = `
         key
         description
         color
+        children { id }
       }
       pageInfo {
         hasNextPage
@@ -542,6 +563,7 @@ type TeamsQueryResult = {
       key: string;
       description: string | null;
       color: string | null;
+      children: Array<{ id: string }>;
     }>;
     pageInfo: { hasNextPage: boolean; endCursor: string | null };
   };
@@ -552,7 +574,7 @@ async function _syncTeams() {
 
   let hasNextPage = true;
   let endCursor: string | undefined;
-  let total = 0;
+  const allTeams: TeamsQueryResult["teams"]["nodes"] = [];
 
   while (hasNextPage) {
     const result = await linear.client.request<TeamsQueryResult>(TEAMS_QUERY, {
@@ -561,32 +583,60 @@ async function _syncTeams() {
     });
 
     const { nodes: teams, pageInfo } = result.teams;
+    allTeams.push(...teams);
 
-    for (const team of teams) {
-      await prisma.team.upsert({
-        where: { id: team.id },
-        update: {
-          name: team.name,
-          key: team.key,
-          description: team.description ?? null,
-          color: team.color ?? null,
-        },
-        create: {
-          id: team.id,
-          name: team.name,
-          key: team.key,
-          description: team.description ?? null,
-          color: team.color ?? null,
-        },
-      });
-    }
-
-    total += teams.length;
     hasNextPage = pageInfo.hasNextPage;
     endCursor = pageInfo.endCursor ?? undefined;
   }
 
-  console.log(`[sync] Upserted ${total} teams.`);
+  // Pass 1: upsert all team records first so FK references are valid in pass 2.
+  for (const team of allTeams) {
+    await prisma.team.upsert({
+      where: { id: team.id },
+      update: {
+        name: team.name,
+        key: team.key,
+        description: team.description ?? null,
+        color: team.color ?? null,
+      },
+      create: {
+        id: team.id,
+        name: team.name,
+        key: team.key,
+        description: team.description ?? null,
+        color: team.color ?? null,
+      },
+    });
+  }
+
+  // Pass 2: sync TeamChildren join records for each parent team.
+  // Only reference child IDs that were actually synced to avoid FK violations
+  // (Linear may return children that are archived or otherwise excluded).
+  const syncedIds = new Set(allTeams.map((t) => t.id));
+
+  for (const team of allTeams) {
+    const childIds = team.children.map((c) => c.id).filter((id) => syncedIds.has(id));
+
+    // Upsert each child relationship.
+    for (const childId of childIds) {
+      await prisma.teamChildren.upsert({
+        where: { parentId_childId: { parentId: team.id, childId } },
+        update: {},
+        create: { parentId: team.id, childId },
+      });
+    }
+
+    // Remove stale children no longer present in Linear.
+    if (childIds.length > 0) {
+      await prisma.teamChildren.deleteMany({
+        where: { parentId: team.id, childId: { notIn: childIds } },
+      });
+    } else {
+      await prisma.teamChildren.deleteMany({ where: { parentId: team.id } });
+    }
+  }
+
+  console.log(`[sync] Upserted ${allTeams.length} teams.`);
 }
 
 // ---------------------------------------------------------------------------

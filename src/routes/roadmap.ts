@@ -15,7 +15,7 @@ export async function roadmapRoutes(app: FastifyInstance) {
     const { team: teamKey } = request.query
 
     const [teams, projects, initiatives, syncMeta] = await Promise.all([
-      prisma.team.findMany({ orderBy: { name: 'asc' } }),
+      prisma.team.findMany({ orderBy: { name: 'asc' }, include: { childTeams: true } }),
       prisma.project.findMany({
         where: teamKey ? { team: { key: teamKey } } : undefined,
         orderBy: [{ state: 'asc' }, { targetDate: 'asc' }, { name: 'asc' }],
@@ -55,6 +55,7 @@ export async function roadmapRoutes(app: FastifyInstance) {
         name: t.name,
         key: t.key,
         color: t.color,
+        childrenIds: t.childTeams.map((c) => c.childId),
         projectCount: projects.filter((p) => p.teamId === t.id).length,
       })),
       initiatives: initiatives.map((i): RoadmapInitiative => {
