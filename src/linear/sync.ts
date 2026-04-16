@@ -3,13 +3,48 @@ import { linear } from "./client.js";
 import { prisma } from "../db/client.js";
 
 // ---------------------------------------------------------------------------
+// Retry helper — retries transient API errors (5xx / network) with backoff
+// ---------------------------------------------------------------------------
+
+function isTransientError(err: unknown): boolean {
+  if (!(err instanceof Error)) return false;
+  const status = (err as unknown as Record<string, unknown>).status;
+  if (typeof status === "number" && status >= 500) return true;
+  // GraphQL Error (Code: 5xx) message from Linear SDK
+  if (/GraphQL Error \(Code: 5\d\d\)/.test(err.message)) return true;
+  return false;
+}
+
+async function withRetry<T>(
+  fn: () => Promise<T>,
+  retries = 3,
+  delayMs = 2000,
+): Promise<T> {
+  let lastErr: unknown;
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      if (!isTransientError(err) || attempt === retries) throw err;
+      lastErr = err;
+      const wait = delayMs * 2 ** attempt;
+      console.warn(
+        `[sync] Transient API error (attempt ${attempt + 1}/${retries}), retrying in ${wait}ms...`,
+      );
+      await new Promise((r) => setTimeout(r, wait));
+    }
+  }
+  throw lastErr;
+}
+
+// ---------------------------------------------------------------------------
 // Concurrency guard — prevents multiple simultaneous syncs of the same type.
 // If a sync is already running when a second request arrives, it sets a
 // "pending" flag. After the running sync finishes, one more run is executed.
 // This coalesces any number of queued requests into at most one follow-up run.
 // ---------------------------------------------------------------------------
 
-type SyncType = "teams" | "projects" | "issues" | "initiatives" | "all";
+type SyncType = "teams" | "projects" | "initiatives" | "all";
 
 const syncState = new Map<SyncType, { running: boolean; pending: boolean }>();
 
@@ -63,7 +98,6 @@ export async function syncAll(): Promise<void> {
 
     try {
       await _syncProjects(); // also syncs teams first (FK dependency)
-      await _syncIssues();
       await _syncInitiatives();
 
       await prisma.syncMeta.update({
@@ -100,11 +134,6 @@ export async function syncProjects(): Promise<void> {
   return runWithGuard("projects", _syncProjects);
 }
 
-/** Sync only issues (and their labels). */
-export async function syncIssues(): Promise<void> {
-  return runWithGuard("issues", _syncIssues);
-}
-
 /** Sync only initiatives (and their project associations). */
 export async function syncInitiatives(): Promise<void> {
   return runWithGuard("initiatives", _syncInitiatives);
@@ -125,10 +154,20 @@ const SINGLE_PROJECT_QUERY = `
       icon
       startDate
       targetDate
+      completedAt
       progress
       url
       teams {
         nodes { id }
+      }
+      projectMilestones {
+        nodes {
+          id
+          name
+          description
+          targetDate
+          sortOrder
+        }
       }
     }
   }
@@ -144,9 +183,19 @@ type SingleProjectQueryResult = {
     icon: string | null;
     startDate: string | null;
     targetDate: string | null;
+    completedAt: string | null;
     progress: number;
     url: string;
     teams: { nodes: Array<{ id: string }> };
+    projectMilestones: {
+      nodes: Array<{
+        id: string;
+        name: string;
+        description: string | null;
+        targetDate: string | null;
+        sortOrder: number;
+      }>;
+    };
   } | null;
 };
 
@@ -176,6 +225,7 @@ export async function syncSingleProject(id: string): Promise<void> {
       icon: project.icon ?? null,
       startDate: project.startDate ? new Date(project.startDate) : null,
       targetDate: project.targetDate ? new Date(project.targetDate) : null,
+      completedAt: project.completedAt ? new Date(project.completedAt) : null,
       progress: project.progress ?? 0,
       url: project.url,
       teamId,
@@ -189,94 +239,41 @@ export async function syncSingleProject(id: string): Promise<void> {
       icon: project.icon ?? null,
       startDate: project.startDate ? new Date(project.startDate) : null,
       targetDate: project.targetDate ? new Date(project.targetDate) : null,
+      completedAt: project.completedAt ? new Date(project.completedAt) : null,
       progress: project.progress ?? 0,
       url: project.url,
       teamId,
     },
   });
 
-  await syncMilestonesForProject(project.id);
+  const incomingMilestoneIds = new Set(project.projectMilestones.nodes.map((m) => m.id));
+  for (const milestone of project.projectMilestones.nodes) {
+    await prisma.milestone.upsert({
+      where: { id: milestone.id },
+      update: {
+        name: milestone.name,
+        description: milestone.description ?? null,
+        targetDate: milestone.targetDate ? new Date(milestone.targetDate) : null,
+        sortOrder: milestone.sortOrder ?? 0,
+        projectId: project.id,
+      },
+      create: {
+        id: milestone.id,
+        name: milestone.name,
+        description: milestone.description ?? null,
+        targetDate: milestone.targetDate ? new Date(milestone.targetDate) : null,
+        sortOrder: milestone.sortOrder ?? 0,
+        projectId: project.id,
+      },
+    });
+  }
+  await prisma.milestone.deleteMany({
+    where: { projectId: project.id, id: { notIn: [...incomingMilestoneIds] } },
+  });
+
   console.log(`[sync] Upserted project ${project.id}.`);
 }
 
-/** Sync a single issue (and its labels) by ID. */
-export async function syncSingleIssue(id: string): Promise<void> {
-  const issue = await linear.issue(id);
-  if (!issue) {
-    console.log(`[sync] Issue ${id} not found in Linear, skipping.`);
-    return;
-  }
-
-  const state = await issue.state;
-  const assignee = await issue.assignee;
-  const issueLabels = await issue.labels();
-  const projectId = (await issue.project)?.id ?? null;
-  const milestoneId = (await issue.projectMilestone)?.id ?? null;
-
-  // Ensure the milestone exists in DB before upserting the issue (FK constraint)
-  if (milestoneId && projectId) {
-    await syncMilestonesForProject(projectId);
-  }
-
-  const labelIds: string[] = [];
-  for (const label of issueLabels.nodes) {
-    await prisma.label.upsert({
-      where: { id: label.id },
-      update: { name: label.name, color: label.color ?? null },
-      create: { id: label.id, name: label.name, color: label.color ?? null },
-    });
-    labelIds.push(label.id);
-  }
-
-  await prisma.issue.upsert({
-    where: { id: issue.id },
-    update: {
-      title: issue.title,
-      description: issue.description ?? null,
-      state: state?.type ?? "unstarted",
-      stateName: state?.name ?? "",
-      stateColor: state?.color ?? null,
-      stateType: state?.type ?? null,
-      priority: issue.priority ?? 0,
-      priorityName: issue.priorityLabel,
-      estimate: issue.estimate ?? null,
-      dueDate: issue.dueDate ? new Date(issue.dueDate) : null,
-      startedAt: issue.startedAt ?? null,
-      completedAt: issue.completedAt ? new Date(issue.completedAt) : null,
-      cancelledAt: issue.cancelledAt ? new Date(issue.cancelledAt) : null,
-      url: issue.url,
-      projectId,
-      milestoneId,
-      assigneeId: assignee?.id ?? null,
-      assigneeName: assignee?.name ?? null,
-      labels: { set: labelIds.map((id) => ({ id })) },
-    },
-    create: {
-      id: issue.id,
-      title: issue.title,
-      description: issue.description ?? null,
-      state: state?.type ?? "unstarted",
-      stateName: state?.name ?? "",
-      stateColor: state?.color ?? null,
-      stateType: state?.type ?? null,
-      priority: issue.priority ?? 0,
-      priorityName: issue.priorityLabel,
-      estimate: issue.estimate ?? null,
-      dueDate: issue.dueDate ? new Date(issue.dueDate) : null,
-      startedAt: issue.startedAt ?? null,
-      completedAt: issue.completedAt ? new Date(issue.completedAt) : null,
-      cancelledAt: issue.cancelledAt ? new Date(issue.cancelledAt) : null,
-      url: issue.url,
-      projectId,
-      milestoneId,
-      assigneeId: assignee?.id ?? null,
-      assigneeName: assignee?.name ?? null,
-      labels: { connect: labelIds.map((id) => ({ id })) },
-    },
-  });
-
-  console.log(`[sync] Upserted issue ${issue.id}.`);
-}
 
 const SINGLE_INITIATIVE_QUERY = `
   query SyncSingleInitiative($id: String!) {
@@ -658,10 +655,20 @@ const PROJECTS_QUERY = `
         icon
         startDate
         targetDate
+        completedAt
         progress
         url
         teams {
           nodes { id }
+        }
+        projectMilestones {
+          nodes {
+            id
+            name
+            description
+            targetDate
+            sortOrder
+          }
         }
       }
       pageInfo {
@@ -683,9 +690,19 @@ type ProjectsQueryResult = {
       icon: string | null;
       startDate: string | null;
       targetDate: string | null;
+      completedAt: string | null;
       progress: number;
       url: string;
       teams: { nodes: Array<{ id: string }> };
+      projectMilestones: {
+        nodes: Array<{
+          id: string;
+          name: string;
+          description: string | null;
+          targetDate: string | null;
+          sortOrder: number;
+        }>;
+      };
     }>;
     pageInfo: { hasNextPage: boolean; endCursor: string | null };
   };
@@ -722,6 +739,7 @@ async function _syncProjects() {
           icon: project.icon ?? null,
           startDate: project.startDate ? new Date(project.startDate) : null,
           targetDate: project.targetDate ? new Date(project.targetDate) : null,
+          completedAt: project.completedAt ? new Date(project.completedAt) : null,
           progress: project.progress ?? 0,
           url: project.url,
           teamId,
@@ -735,13 +753,39 @@ async function _syncProjects() {
           icon: project.icon ?? null,
           startDate: project.startDate ? new Date(project.startDate) : null,
           targetDate: project.targetDate ? new Date(project.targetDate) : null,
+          completedAt: project.completedAt ? new Date(project.completedAt) : null,
           progress: project.progress ?? 0,
           url: project.url,
           teamId,
         },
       });
 
-      await syncMilestonesForProject(project.id);
+      // Upsert milestones inline — no extra API call needed
+      const incomingMilestoneIds = new Set(project.projectMilestones.nodes.map((m) => m.id));
+      for (const milestone of project.projectMilestones.nodes) {
+        await prisma.milestone.upsert({
+          where: { id: milestone.id },
+          update: {
+            name: milestone.name,
+            description: milestone.description ?? null,
+            targetDate: milestone.targetDate ? new Date(milestone.targetDate) : null,
+            sortOrder: milestone.sortOrder ?? 0,
+            projectId: project.id,
+          },
+          create: {
+            id: milestone.id,
+            name: milestone.name,
+            description: milestone.description ?? null,
+            targetDate: milestone.targetDate ? new Date(milestone.targetDate) : null,
+            sortOrder: milestone.sortOrder ?? 0,
+            projectId: project.id,
+          },
+        });
+      }
+      // Remove milestones that no longer exist in Linear
+      await prisma.milestone.deleteMany({
+        where: { projectId: project.id, id: { notIn: [...incomingMilestoneIds] } },
+      });
     }
 
     total += projects.length;
@@ -752,141 +796,6 @@ async function _syncProjects() {
   console.log(`[sync] Upserted ${total} projects.`);
 }
 
-async function syncMilestonesForProject(projectId: string) {
-  const project = await linear.project(projectId);
-  const milestones = await project.projectMilestones();
-
-  for (const milestone of milestones.nodes) {
-    await prisma.milestone.upsert({
-      where: { id: milestone.id },
-      update: {
-        name: milestone.name,
-        description: milestone.description ?? null,
-        targetDate: milestone.targetDate
-          ? new Date(milestone.targetDate)
-          : null,
-        sortOrder: milestone.sortOrder ?? 0,
-        projectId,
-      },
-      create: {
-        id: milestone.id,
-        name: milestone.name,
-        description: milestone.description ?? null,
-        targetDate: milestone.targetDate
-          ? new Date(milestone.targetDate)
-          : null,
-        sortOrder: milestone.sortOrder ?? 0,
-        projectId,
-      },
-    });
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Issues
-// ---------------------------------------------------------------------------
-
-async function _syncIssues() {
-  console.log("[sync] Fetching issues...");
-
-  let hasNextPage = true;
-  let endCursor: string | undefined;
-  let total = 0;
-  const syncedMilestoneProjects = new Set<string>();
-
-  while (hasNextPage) {
-    const issues = await linear.issues({
-      first: 100,
-      after: endCursor,
-      filter: {
-        // Only fetch issues attached to a project so they're roadmap-relevant
-        project: { null: false },
-      },
-    });
-
-    for (const issue of issues.nodes) {
-      const state = await issue.state;
-      const assignee = await issue.assignee;
-      const issueLabels = await issue.labels();
-      const projectId = (await issue.project)?.id ?? null;
-      const milestoneId = (await issue.projectMilestone)?.id ?? null;
-
-      // Ensure the milestone exists in DB before upserting the issue (FK constraint)
-      if (milestoneId && projectId && !syncedMilestoneProjects.has(projectId)) {
-        await syncMilestonesForProject(projectId);
-        syncedMilestoneProjects.add(projectId);
-      }
-
-      // Upsert labels
-      const labelIds: string[] = [];
-      for (const label of issueLabels.nodes) {
-        await prisma.label.upsert({
-          where: { id: label.id },
-          update: { name: label.name, color: label.color ?? null },
-          create: {
-            id: label.id,
-            name: label.name,
-            color: label.color ?? null,
-          },
-        });
-        labelIds.push(label.id);
-      }
-
-      await prisma.issue.upsert({
-        where: { id: issue.id },
-        update: {
-          title: issue.title,
-          description: issue.description ?? null,
-          state: state?.type ?? "unstarted",
-          stateName: state?.name ?? "",
-          stateColor: state?.color ?? null,
-          stateType: state?.type ?? null,
-          priority: issue.priority ?? 0,
-          priorityName: issue.priorityLabel,
-          estimate: issue.estimate ?? null,
-          dueDate: issue.dueDate ? new Date(issue.dueDate) : null,
-          startedAt: issue.startedAt ?? null,
-          completedAt: issue.completedAt ? new Date(issue.completedAt) : null,
-          cancelledAt: issue.cancelledAt ? new Date(issue.cancelledAt) : null,
-          url: issue.url,
-          projectId,
-          milestoneId,
-          assigneeId: assignee?.id ?? null,
-          assigneeName: assignee?.name ?? null,
-          labels: { set: labelIds.map((id) => ({ id })) },
-        },
-        create: {
-          id: issue.id,
-          title: issue.title,
-          description: issue.description ?? null,
-          state: state?.type ?? "unstarted",
-          stateName: state?.name ?? "",
-          stateColor: state?.color ?? null,
-          stateType: state?.type ?? null,
-          priority: issue.priority ?? 0,
-          priorityName: issue.priorityLabel,
-          estimate: issue.estimate ?? null,
-          dueDate: issue.dueDate ? new Date(issue.dueDate) : null,
-          startedAt: issue.startedAt ?? null,
-          completedAt: issue.completedAt ? new Date(issue.completedAt) : null,
-          cancelledAt: issue.cancelledAt ? new Date(issue.cancelledAt) : null,
-          url: issue.url,
-          projectId,
-          milestoneId,
-          assigneeId: assignee?.id ?? null,
-          assigneeName: assignee?.name ?? null,
-          labels: { connect: labelIds.map((id) => ({ id })) },
-        },
-      });
-    }
-
-    total += issues.nodes.length;
-    hasNextPage = issues.pageInfo.hasNextPage;
-    endCursor = issues.pageInfo.endCursor ?? undefined;
-  }
-
-  console.log(`[sync] Upserted ${total} issues.`);
-}
 
 // ---------------------------------------------------------------------------
 // Initiatives

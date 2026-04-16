@@ -40,6 +40,7 @@ model Project {
   priority    Int            @default(0)
   startDate   DateTime?
   targetDate  DateTime?
+  completedAt DateTime?
   progress    Float          @default(0)
   url         String?
   createdAt   DateTime       @default(now())
@@ -51,6 +52,7 @@ model Project {
   milestones  Milestone[]
   issues      Issue[]
   initiatives InitiativeToProject[]
+  views       CustomViewToProject[]
 }
 
 model Milestone {
@@ -131,6 +133,35 @@ model InitiativeToProject {
   project      Project    @relation(fields: [projectId], references: [id], onDelete: Cascade)
 
   @@unique([initiativeId, projectId])
+}
+
+model CustomView {
+  id          String   @id
+  name        String
+  description String?
+  icon        String?
+  color       String?
+  modelName   String?
+  filterData  Json?
+  ownerId     String?
+  ownerName   String?
+  teamId      String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  projects    CustomViewToProject[]
+}
+
+model CustomViewToProject {
+  id        String     @id
+  viewId    String
+  projectId String
+  sortOrder Float      @default(0)
+
+  view      CustomView @relation(fields: [viewId], references: [id], onDelete: Cascade)
+  project   Project    @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@unique([viewId, projectId])
 }
 
 // Tracks the last time we synced from Linear

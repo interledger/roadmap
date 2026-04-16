@@ -1,6 +1,6 @@
 import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify'
 import { createHmac, timingSafeEqual } from 'crypto'
-import { syncAll, syncTeams, syncProjects, syncIssues, syncInitiatives, syncSingleProject, syncSingleIssue, syncSingleInitiative, triggerDeploys } from '../linear/sync.js'
+import { syncAll, syncTeams, syncProjects, syncInitiatives, syncSingleProject, syncSingleInitiative, triggerDeploys } from '../linear/sync.js'
 import { prisma } from '../db/client.js'
 
 // Linear sends webhooks for these action types
@@ -12,10 +12,8 @@ const RELEVANT_ACTIONS = new Set([
 
 // These resource types affect the roadmap
 const RELEVANT_TYPES = new Set([
-  'Issue',
   'Project',
   'ProjectMilestone',
-  'IssueLabel',
   'Initiative',
   'InitiativeToProject',
 ])
@@ -40,8 +38,8 @@ export async function webhookRoutes(app: FastifyInstance) {
    *
    * Webhook events are routed to the minimal targeted sync rather than a full
    * syncAll(), reducing Linear API load significantly:
-   *   Issue / IssueLabel  → syncIssues()
-   *   Project / Milestone → syncProjects()
+   *   Project / Milestone → syncSingleProject()
+   *   Initiative          → syncSingleInitiative()
    */
   app.post(
     '/webhook/linear',
@@ -101,11 +99,7 @@ export async function webhookRoutes(app: FastifyInstance) {
       ) {
         let syncFn: () => Promise<void>
 
-        if (type === 'Issue') {
-          syncFn = data?.id ? () => syncSingleIssue(data.id!) : syncIssues
-        } else if (type === 'IssueLabel') {
-          syncFn = syncIssues
-        } else if (type === 'Project') {
+        if (type === 'Project') {
           syncFn = data?.id ? () => syncSingleProject(data.id!) : syncProjects
         } else if (type === 'ProjectMilestone') {
           let projectId = data?.projectId
@@ -184,18 +178,4 @@ export async function webhookRoutes(app: FastifyInstance) {
       })
   })
 
-  /**
-   * POST /api/sync/issues
-   *
-   * Manually trigger an issues + labels sync.
-   */
-  app.post('/api/sync/issues', async (request, reply) => {
-    if (!requireAuth(request, reply)) return
-    reply.status(202).send({ message: 'Issues sync started' })
-    syncIssues()
-      .then(() => triggerDeploys())
-      .catch((err) => {
-        app.log.error({ err }, 'Issues sync failed')
-      })
-  })
 }

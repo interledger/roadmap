@@ -35,10 +35,13 @@ Edit `.env`:
 | `LINEAR_API_KEY` | Personal API key from Linear → Settings → API |
 | `LINEAR_WEBHOOK_SECRET` | Secret you set when creating the Linear webhook |
 | `DATABASE_URL` | PostgreSQL connection string |
-| `PORT` | Port to run the service on (default: 3100) |
-| `API_SECRET` | Bearer token to protect the manual `/api/sync` endpoint |
-| `DEPLOY_HOOK_SITE_1` | Netlify/Vercel deploy hook URL for site 1 |
-| `DEPLOY_HOOK_SITE_2` | Netlify/Vercel deploy hook URL for site 2 (add when ready) |
+| `PORT` | Port to run the service on (default: `3100`) |
+| `HOST` | Server bind address (default: `0.0.0.0`) |
+| `NODE_ENV` | `development` or `production` |
+| `API_SECRET` | Bearer token to protect the manual `/api/sync` endpoints |
+| `DEPLOY_HOOK_SITE_1` | Netlify/Vercel deploy hook URL for site 1 (optional) |
+| `DEPLOY_HOOK_SITE_2` | Netlify/Vercel deploy hook URL for site 2 (optional) |
+| `ALLOWED_ORIGINS` | Comma-separated CORS allowed origins (dev default: `*`) |
 
 ---
 
@@ -61,7 +64,7 @@ pnpm db:migrate     # production
 pnpm sync
 ```
 
-This fetches all teams, projects, milestones, and issues from Linear and
+This fetches all teams, projects, milestones, and initiatives from Linear and
 writes them to PostgreSQL.
 
 ---
@@ -84,176 +87,193 @@ In Linear → Settings → API → Webhooks:
 
 - **URL**: `https://your-service.com/webhook/linear`
 - **Secret**: same value as `LINEAR_WEBHOOK_SECRET` in `.env`
-- **Events**: Issues, Projects, Project Milestones, Issue Labels
+- **Events**: Projects, Project Milestones, Initiatives
+
+> Issues and Labels are not used by the roadmap and do not need to be enabled.
+
+---
+
+## CLI Commands
+
+| Command | Purpose |
+|---|---|
+| `pnpm dev` | Run dev server with hot reload |
+| `pnpm build` | Compile TypeScript to `dist/` |
+| `pnpm start` | Run compiled server (production) |
+| **Syncing** | |
+| `pnpm sync` | Full sync: teams → projects → initiatives |
+| `pnpm sync:teams` | Sync teams only |
+| `pnpm sync:projects` | Sync projects + milestones |
+| `pnpm sync:initiatives` | Sync all initiatives |
+| `pnpm sync:initiative <id>` | Sync a single initiative by Linear ID |
+| `pnpm sync:project <id>` | Sync a single project by Linear ID |
+| `pnpm sync:milestone <id>` | Sync a single milestone by Linear ID |
+| `pnpm sync:view <view-id>` | Sync all projects from a custom Linear view |
+| **Custom views** | |
+| `pnpm fetch:views` | List all custom views in your workspace with their IDs |
+| `pnpm fetch:view <view-id>` | Display details (filters, projects) for a single view |
+| **Database** | |
+| `pnpm db:generate` | Generate Prisma client |
+| `pnpm db:push` | Push schema to DB (dev) |
+| `pnpm db:migrate` | Run migrations (production) |
+| `pnpm db:studio` | Open Prisma Studio (visual DB browser) |
 
 ---
 
 ## API Endpoints
 
-| Method | Path | Description |
-|---|---|---|
-| `GET` | `/api/roadmap.json` | Full roadmap snapshot |
-| `GET` | `/api/roadmap.json?team=ENG` | Filtered by team key |
-| `GET` | `/api/status` | Sync status and record counts |
-| `POST` | `/api/sync` | Manually trigger a full sync |
-| `POST` | `/webhook/linear` | Linear webhook receiver |
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| `GET` | `/api/roadmap.json` | None | Full roadmap snapshot (60s cache) |
+| `GET` | `/api/status` | None | Sync status and record counts |
+| `POST` | `/api/sync` | Bearer token | Trigger a full sync |
+| `POST` | `/api/sync/teams` | Bearer token | Trigger teams-only sync |
+| `POST` | `/api/sync/projects` | Bearer token | Trigger projects + milestones sync |
+| `POST` | `/webhook/linear` | HMAC-SHA256 | Linear webhook receiver |
+
+### Manual sync example
+
+```bash
+curl -X POST https://your-service.com/api/sync \
+  -H "Authorization: Bearer YOUR_API_SECRET"
+```
 
 ---
 
-## Using in Astro (build time)
+## Custom View
+
+`/api/roadmap.json` sources its projects from a specific Linear **custom view**
+rather than fetching all projects across all teams. The view ID is set in
+`src/routes/roadmap.ts` as `ROADMAP_VIEW_ID`.
+
+To find or change the view:
+
+```bash
+# List all custom views in your workspace
+pnpm fetch:views
+
+# Inspect a specific view
+pnpm fetch:view <view-id>
+```
+
+Once you have the right view ID, update the constant in
+`src/routes/roadmap.ts` and re-sync with `pnpm sync:view <view-id>`.
+
+---
+
+## Roadmap JSON Output
+
+`GET /api/roadmap.json` returns:
+
+```typescript
+interface RoadmapSnapshot {
+  generatedAt: string        // ISO timestamp of this response
+  lastSyncAt: string | null  // ISO timestamp of the last completed sync
+  teams: RoadmapTeam[]
+  projects: RoadmapProject[] // ordered by sortOrder from the custom view
+}
+
+interface RoadmapTeam {
+  id: string
+  name: string
+  key: string
+  color: string | null
+  childrenIds: string[]   // IDs of child teams
+  projectCount: number    // count of projects belonging to this team
+}
+
+interface RoadmapProject {
+  id: string
+  name: string
+  description: string | null
+  state: 'planned' | 'started' | 'paused' | 'completed' | 'cancelled'
+  color: string | null
+  icon: string | null
+  priority: number
+  progress: number          // 0–100
+  sortOrder: number         // position within the custom view
+  startDate: string | null  // ISO
+  targetDate: string | null // ISO
+  completedAt: string | null
+  url: string | null
+  team: { id: string; name: string; key: string; color: string | null } | null
+  milestones: RoadmapMilestone[]
+}
+
+interface RoadmapMilestone {
+  id: string
+  name: string
+  targetDate: string | null  // ISO
+}
+```
+
+Archived projects (name prefixed with `(Archived) `) are excluded from the
+response automatically.
+
+---
+
+## Using in Astro
+
+### Fetch at build time (SSG)
 
 ```astro
 ---
 // src/pages/roadmap.astro
 const res = await fetch(import.meta.env.ROADMAP_API_URL + '/api/roadmap.json')
-const roadmap = await res.json()
+const { teams, projects } = await res.json()
 ---
 
-<RoadmapBoard projects={roadmap.projects} teams={roadmap.teams} />
+<RoadmapBoard teams={teams} projects={projects} />
 ```
 
 Add to your Astro `.env`:
+
 ```
 ROADMAP_API_URL=https://your-service.com
 ```
 
----
-
-## RoadmapBoard Astro Component
-
-### Data shape
-
-Fetch the `board` field from the roadmap JSON — it's a pre-joined hierarchy ready for rendering:
-
-```
-BoardRow (initiative)
-  └─ BoardProject[]
-       └─ BoardMilestone[]
-```
-
-**BoardRow** (one row per initiative)
-| Field | Type | Notes |
-|---|---|---|
-| `id` | string | |
-| `name` | string | |
-| `color` | string \| null | Use as row background tint |
-| `icon` | string \| null | |
-| `status` | string | `planned` \| `active` \| `completed` |
-| `startDate` | string \| null | ISO — earliest project start |
-| `targetDate` | string \| null | ISO |
-| `projects` | BoardProject[] | Ordered by `sortOrder` from Linear |
-
-**BoardProject** (label chip on its own sub-row)
-| Field | Type | Notes |
-|---|---|---|
-| `id` | string | |
-| `name` | string | |
-| `color` | string \| null | Use as label background |
-| `state` | string | `planned` \| `started` \| `paused` \| `completed` \| `cancelled` |
-| `icon` | string \| null | |
-| `progress` | number | 0–100 |
-| `startDate` | string \| null | ISO |
-| `targetDate` | string \| null | ISO |
-| `url` | string \| null | Link to Linear project |
-| `milestones` | BoardMilestone[] | Ordered by `sortOrder` |
-
-**BoardMilestone** (label chip along the timeline)
-| Field | Type | Notes |
-|---|---|---|
-| `id` | string | |
-| `name` | string | |
-| `sortOrder` | number | |
-| `startDate` | string \| null | ISO — **inherited from parent project** |
-| `targetDate` | string \| null | ISO |
-| `color` | string \| null | **Inherited from parent project** — use as label background |
-
----
-
-### Visual rendering spec
-
-```
-Visual layout:
-┌──────────────────────────────────────────────────────────────────────┐
-│ [sticky label col 240px] │ [Q1 2025] │ [Q2 2025] │ … │ [Q4 2027]   │
-├──────────────────────────┼────────────────────────────────────────── │
-│ ■ Initiative name        │ ─────── colored band across all cols ─── │
-│   [Project chip ↗]       │     ░░░░░░░░░░ milestone chips ░░░░░░░░░ │
-│   ├─ Milestone A name    │              [████ Milestone A ████]      │
-│   └─ Milestone B name    │                      [███ B ███]         │
-│   [Project chip 2 ↗]     │                                          │
-│   └─ Milestone C         │         [████████████ C ███████████]     │
-└──────────────────────────────────────────────────────────────────────┘
-```
-
-- **Initiative row** — full-width band; apply `initiative.color` at ~15% opacity as `background-color`
-- **Project label** — chip/pill on its own sub-row; `background-color: project.color`; links to `project.url`
-- **Milestone chips** — positioned along a timeline axis using `startDate` (left edge) → `targetDate` (right edge); `background-color: project.color` (inherited); display `milestone.name`
-
----
-
-### Component props & usage
-
-```typescript
-// types (import from your roadmap API types or copy locally)
-interface BoardMilestone {
-  id: string; name: string; sortOrder: number
-  startDate: string | null; targetDate: string | null; color: string | null
-}
-interface BoardProject {
-  id: string; name: string; color: string | null; state: string
-  icon: string | null; progress: number
-  startDate: string | null; targetDate: string | null; url: string | null
-  milestones: BoardMilestone[]
-}
-interface BoardRow {
-  id: string; name: string; description: string | null
-  color: string | null; icon: string | null; status: string
-  startDate: string | null; targetDate: string | null
-  projects: BoardProject[]
-}
-```
-
-```astro
----
-// src/pages/roadmap.astro
-const res = await fetch(import.meta.env.ROADMAP_API_URL + '/api/roadmap.json')
-const { board } = await res.json()
----
-
-<RoadmapBoard board={board} />
-```
+### Component example
 
 ```astro
 ---
 // src/components/RoadmapBoard.astro
-interface Props { board: BoardRow[] }
-const { board } = Astro.props
+interface Props {
+  teams: RoadmapTeam[]
+  projects: RoadmapProject[]
+}
+const { projects } = Astro.props
 ---
 
-{board.map((row) => (
-  <div class="initiative-row" style={`background-color: ${row.color}26`}>
-    <span class="initiative-name">{row.icon} {row.name}</span>
-    {row.projects.map((project) => (
-      <div class="project-row">
-        <a class="project-label" href={project.url ?? '#'}
-           style={`background-color: ${project.color}`}>
-          {project.icon} {project.name}
-        </a>
-        <div class="milestones-timeline">
-          {project.milestones.map((ms) => (
-            <span class="milestone-chip"
-                  style={`background-color: ${ms.color}`}
-                  data-start={ms.startDate}
-                  data-end={ms.targetDate}>
-              {ms.name}
-            </span>
-          ))}
-        </div>
-      </div>
-    ))}
+{projects.map((project) => (
+  <div class="project" style={`border-left-color: ${project.color}`}>
+    <a href={project.url ?? '#'}>{project.icon} {project.name}</a>
+    <span class="state">{project.state}</span>
+    <div class="milestones">
+      {project.milestones.map((ms) => (
+        <span class="milestone">{ms.name} — {ms.targetDate}</span>
+      ))}
+    </div>
   </div>
 ))}
 ```
+
+---
+
+## Webhook Sync Routing
+
+When Linear fires a webhook, the service routes it to the narrowest sync
+available — avoiding a full re-sync for single-record changes:
+
+| Linear event type | Sync triggered |
+|---|---|
+| `Project` | `syncSingleProject(id)` |
+| `ProjectMilestone` | `syncSingleProject(parentProjectId)` |
+| `Initiative` | `syncSingleInitiative(id)` |
+| `InitiativeToProject` | `syncSingleInitiative(initiativeId)` |
+| Anything else | `syncAll()` |
+
+The service acknowledges the webhook immediately (returns `200`) and runs the
+sync asynchronously.
 
 ---
 
@@ -262,5 +282,5 @@ const { board } = Astro.props
 1. Push this folder to its own Git repo
 2. Create a new Railway project → Deploy from GitHub
 3. Add a PostgreSQL plugin in Railway
-4. Set environment variables in Railway dashboard
+4. Set environment variables in the Railway dashboard
 5. Railway auto-deploys on every push

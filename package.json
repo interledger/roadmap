@@ -16,6 +16,7 @@
     "sync:initiative": "tsx src/linear/sync-cli.ts initiative",
     "sync:project": "tsx src/linear/sync-cli.ts project",
     "sync:milestone": "tsx src/linear/sync-cli.ts milestone",
+    "sync:view": "tsx src/linear/sync-view.ts",
     "fetch:view": "tsx src/linear/fetch-view.ts",
     "fetch:views": "tsx src/linear/fetch-views.ts",
     "db:generate": "prisma generate",
